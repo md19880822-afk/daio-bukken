@@ -238,6 +238,8 @@ details.sec .body{padding:2px 12px 12px}
 .catch .l{font-weight:500;font-size:calc(var(--fs) * 1.06);text-align:center}
 .pts{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;margin-top:7px;padding-top:7px;border-top:1px dashed #9db3cf;position:relative}
 .pt{display:flex;gap:6px;align-items:flex-start;line-height:1.45;font-size:calc(var(--fs) * .93)}
+.ptnote{font-size:calc(var(--fs) * .66);color:#445;text-align:right;margin-top:3px;line-height:1.25}
+.rs-web{margin:4px 0 8px;padding-left:18px}.rs-web li{margin:2px 0}
 .pt b{flex:none;background:#1f3a5f;color:#fff;font-size:calc(var(--fs) * .78);padding:1px 6px;border-radius:2px;margin-top:2px;letter-spacing:.04em;min-width:52px;text-align:center}
 .s-title{text-align:center;font-family:"Noto Serif JP",serif;font-weight:800;font-size:calc(var(--fs) * 1.8);letter-spacing:.5em;margin:0 0 -1px;padding-left:.5em}
 table.gai{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;border:1.6px solid #111}
@@ -338,12 +340,13 @@ table.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:ce
         <div><label class="f" for="memoTanto">担当者 <span class="note">（手入力できます）</span></label><input class="in" id="memoTanto" list="tantoList" autocomplete="off" placeholder="例）山田太郎 090-1234-5678"><datalist id="tantoList"></datalist></div>
       </div>
       <label class="chk"><input type="checkbox" id="hiAcc" checked> 高精度モード（時間はかかりますが、より慎重に読み取ります）</label>
+      <label class="chk"><input type="checkbox" id="webOn" checked> 周辺環境とネットの情報を調べて、アピールポイントに使う <span class="note" id="webOnNote">（周辺の施設・徒歩の道のり・標高を地図で調べます。無料）</span></label>
       <button class="btn primary go" id="btnGen" type="button">物件資料を自動作成</button>
       <div class="status" id="status" aria-live="polite"></div>
       <details class="sec" style="margin-top:12px" id="webSec">
         <summary>ネットの情報で裏付ける（任意）</summary>
         <div class="body">
-          <p class="note" style="margin:6px 0 8px">このアプリのAIはインターネットを直接検索できません。ネットで裏付けたいときは、指示文をコピーして Claude に貼り付け、返ってきた回答をここへ貼り付けてください。キャッチコピー・アピールポイント・交通・学校区に反映します。</p>
+          <p class="note" id="webNote" style="margin:6px 0 8px">この表示のAIはインターネットを直接検索できません。ネットで裏付けたいときは、指示文をコピーして Claude に貼り付け、返ってきた回答をここへ貼り付けてください。キャッチコピー・アピールポイント・交通・学校区に反映します。</p>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="btn sm" id="btnCopyPrompt" type="button">調査の指示文をコピー</button><a href="https://claude.ai/new" target="_blank" rel="noopener" class="note">Claude を開く ↗</a></div>
           <textarea class="in" id="promptBox" rows="4" style="margin-top:8px;display:none" readonly></textarea>
           <textarea class="in" id="webPaste" rows="4" style="margin-top:8px" placeholder="Claude の回答をここに貼り付け"></textarea>
@@ -473,8 +476,19 @@ table.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:ce
 
   const STORE = "daio-bukken-ai-v1";
   const API = "https://api.anthropic.com/v1/messages";
-  // 高性能で作る：通常も高精度も Claude Opus 5.5（設定でモデルを選んだときはそれを使う）
-  const MODEL = { default: "claude-opus-5-5", complex: "claude-opus-5-5" };
+  // 高性能で作る：読み取り・文章づくりは Claude Opus 5.5。ネット検索で調べる工程だけは、検索結果を大量に読むため費用が半分の Sonnet 5.5
+  //（設定でモデルを選んだときは、すべてそのモデルを使う）
+  const MODEL = { default: "claude-opus-5-5", complex: "claude-opus-5-5", research: "claude-sonnet-5-5" };
+  // 利用料の目安（1ドル160円で計算）：100万トークンあたりのドル（入力・出力）、ネット検索は1回0.01ドル
+  const PRICE = { "claude-opus-5-5": [4, 20], "claude-sonnet-5-5": [2, 10], "claude-haiku-5-5": [0.1, 0.5] }, YEN = 160;
+  const USE = { usd: 0, calls: 0, searches: 0 };
+  function track(j, model) {
+    const u = j && j.usage; if (!u) return;
+    const p = PRICE[model] || PRICE["claude-opus-5-5"];
+    const inT = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) * 1.25 + (u.cache_read_input_tokens || 0) * 0.1;
+    const sr = (u.server_tool_use && u.server_tool_use.web_search_requests) || 0;
+    USE.usd += (inT / 1e6) * p[0] + ((u.output_tokens || 0) / 1e6) * p[1] + sr * 0.01; USE.calls++; USE.searches += sr;
+  }
   const err = (code, message) => Object.assign(new Error(message || code), { code });
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -565,30 +579,61 @@ table.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:ce
       if (/credit balance|billing/i.test(msg)) throw err("no_credit", msg);
       if (r.status === 429 || r.status === 529 || type === "rate_limit_error" || type === "overloaded_error") throw err("rate_limited", msg);
       if (r.status === 413 || /prompt is too long|too large|request_too_large/i.test(msg + type)) throw err("prompt_too_large", msg);
+      if (r.status === 400 && /web[ _-]?search/i.test(msg)) throw err("web_search_off", msg); // 組織の設定でネット検索が無効
       if (r.status === 404 || type === "not_found_error" || /model/i.test(msg) && r.status === 400 && !/image/i.test(msg)) throw err("bad_model", msg);
       if (/image/i.test(msg)) throw err("image_rejected", msg);
       throw err("upstream_error", msg || `HTTP ${r.status}`);
     }
     return r.json();
   }
+  const textOf = arr => arr.filter(b => b && b.type === "text").map(b => b.text).join("");
   async function run(prompt, opts, wantJson) {
     opts = opts || {};
     const c = cfg.get(); if (!c.key) throw err("not_granted");
-    const model = c.model || (opts.modelTier === "complex" ? MODEL.complex : MODEL.default);
+    const model = c.model || MODEL[opts.modelTier] || MODEL.default;
     const content = [];
     for (const im of opts.images || []) content.push(await imagePart(im));
     content.push({ type: "text", text: String(prompt) });
     const body = { model, max_tokens: opts.maxTokens || 16000, messages: [{ role: "user", content }] };
     if (wantJson) body.system = "あなたは日本の不動産会社の資料作成を手伝うアシスタントです。依頼された内容をJSONだけで答えてください。前置き・説明・コードブロックの記号は付けないでください。";
-    const j = await post(c.key, body, opts.signal);
+    // ネット検索（Anthropic のサーバーで検索する。検索1回あたり約1.6円＋読んだ分のトークン）
+    const ws = opts.webSearch;
+    if (ws) body.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: ws.maxUses || 4, user_location: Object.assign({ type: "approximate", country: "JP", region: "Okinawa", timezone: "Asia/Tokyo" }, ws.city ? { city: ws.city } : {}) }];
+    let j = await post(c.key, body, opts.signal); track(j, model);
+    let blocks = (j.content || []).slice();
+    // 長い検索は途中で一度止まる（pause_turn）ので、止まったところから続けてもらう
+    for (let i = 0; i < 4 && j.stop_reason === "pause_turn"; i++) {
+      body.messages = [{ role: "user", content }, { role: "assistant", content: blocks }];
+      j = await post(c.key, body, opts.signal); track(j, model);
+      blocks = blocks.concat(j.content || []);
+    }
     if (j.stop_reason === "refusal") throw err("refused");
-    const text = (j.content || []).filter(b => b && b.type === "text").map(b => b.text).join("");
-    return wantJson ? parseJSON(text) : text;
+    if (!ws) { const text = textOf(blocks); return wantJson ? parseJSON(text) : text; }
+    // 検索の結果：最後の検索より後の文章が答え。出典（引用したページと検索で見たページ）も集める
+    const last = blocks.map(b => b && b.type).lastIndexOf("web_search_tool_result");
+    const src = new Map(), errs = [];
+    for (const b of blocks) {
+      if (!b) continue;
+      if (b.type === "text") for (const ci of b.citations || []) if (ci && /^https:\/\//.test(ci.url || "")) src.set(ci.url, { url: ci.url, title: ci.title || "", cited: true });
+      if (b.type === "web_search_tool_result") {
+        if (Array.isArray(b.content)) { for (const r of b.content) if (r && /^https:\/\//.test(r.url || "") && !src.has(r.url)) src.set(r.url, { url: r.url, title: r.title || "", age: r.page_age || "" }); }
+        else if (b.content && b.content.error_code) errs.push(b.content.error_code);
+      }
+    }
+    const searches = blocks.filter(b => b && b.type === "server_tool_use").length;
+    let out;
+    if (wantJson) { try { out = parseJSON(textOf(blocks.slice(last + 1))); } catch { out = parseJSON(textOf(blocks)); } }
+    else out = { text: textOf(blocks.slice(last + 1)) };
+    if (out && typeof out === "object") {
+      Object.defineProperty(out, "__sources", { value: [...src.values()], enumerable: false });
+      Object.defineProperty(out, "__search", { value: { searches, errors: errs }, enumerable: false });
+    }
+    return out;
   }
   const sample = {
     json: (prompt, opts) => run(prompt, opts, true),
     text: (prompt, opts) => run(prompt, opts, false),
-    limits: async () => ({ images: { maxCount: 20 }, text: true })
+    limits: async () => ({ images: { maxCount: 20 }, text: true, web: true })
   };
   // 設定画面の「保存してAIを使う」：ごく短い問い合わせでキーとモデルを確かめる
   cfg.test = async (key, model) => {
@@ -604,6 +649,8 @@ table.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:ce
     const html = shell.replace("@@APP_SCRIPTS@@", () => tag + "\n" + scripts);
     return new Blob([html], { type: "text/html;charset=utf-8" });
   };
+  cfg.usage = () => ({ calls: USE.calls, searches: USE.searches, usd: USE.usd, yen: Math.round(USE.usd * YEN) });
+  cfg.resetUsage = () => { USE.usd = 0; USE.calls = 0; USE.searches = 0; };
   window.__AI_CFG = cfg;
 
   /* ---------- 保存（通常のダウンロード） ---------- */
@@ -669,7 +716,7 @@ table.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:ce
 })();
 
 </script>
-<script data-app="shell">window.__SHELL="\u003c!DOCTYPE html>\n\u003chtml lang=\"ja\">\n\u003chead>\n\u003cmeta charset=\"utf-8\">\n\u003cmeta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\u003cmeta name=\"robots\" content=\"noindex,nofollow\">\n\u003ctitle>大央ハウジング 物件資料メーカー\u003c/title>\n\u003clink rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n\u003clink rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n\u003clink href=\"https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Serif+JP:wght@600;800&display=swap\" rel=\"stylesheet\">\n\u003cstyle>\n/* Layout: left = 資料投入・確認 / right = A4プレビュー（印刷物そのもの） */\n:root{\n  --bg:#eef1f4; --panel:#ffffff; --ink:#1b2430; --muted:#5d6977; --line:#d6dde4;\n  --accent:#1f3a5f; --accent-soft:#e3eaf3; --cta:#e2580e; --cta-ink:#fff;\n  --warn:#b7791f; --warn-soft:#fdf3dd; --ok:#2f7d4f; --ok-soft:#e2f2e8; --bad:#b42318; --bad-soft:#fde8e6;\n  --f-body:\"Noto Sans JP\",\"Hiragino Sans\",\"Yu Gothic\",sans-serif;\n  --f-display:\"Noto Serif JP\",\"Hiragino Mincho ProN\",\"Yu Mincho\",serif;\n  color-scheme:light;\n}\n@media (prefers-color-scheme: dark){\n  :root:not([data-theme=\"light\"]){\n    --bg:#12171d; --panel:#1b222b; --ink:#e7ecf1; --muted:#9aa7b4; --line:#2e3844;\n    --accent:#8db4e2; --accent-soft:#223246; --cta:#f07a35; --cta-ink:#1a0f08;\n    --warn:#e8b45a; --warn-soft:#3a2f1a; --ok:#6fcf97; --ok-soft:#1d3427; --bad:#f19a8f; --bad-soft:#3b1f1c; color-scheme:dark;\n  }\n}\n:root[data-theme=\"dark\"]{\n  --bg:#12171d; --panel:#1b222b; --ink:#e7ecf1; --muted:#9aa7b4; --line:#2e3844;\n  --accent:#8db4e2; --accent-soft:#223246; --cta:#f07a35; --cta-ink:#1a0f08;\n  --warn:#e8b45a; --warn-soft:#3a2f1a; --ok:#6fcf97; --ok-soft:#1d3427; --bad:#f19a8f; --bad-soft:#3b1f1c; color-scheme:dark;\n}\n*{box-sizing:border-box}\nhtml,body{height:100%;margin:0}\nbody{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:14px;line-height:1.55}\nbutton,input,select,textarea{font:inherit;color:inherit}\n:focus-visible{outline:2px solid var(--cta);outline-offset:2px}\na{color:var(--accent)}\n.top{display:flex;align-items:center;gap:14px;padding:10px 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}\n.brand{display:flex;flex-direction:column;line-height:1.25}\n.brand b{font-family:var(--f-display);font-size:18px;letter-spacing:.04em}\n.brand span{font-size:11px;color:var(--muted)}\n.top .sp{flex:1}\n.aichip{font-size:12px;padding:4px 10px;border-radius:12px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}\n.aichip.full{background:var(--ok-soft);color:var(--ok)}\n.aichip.text,.aichip.none{background:var(--bad-soft);color:var(--bad)}\n.btn{border:1px solid var(--line);background:var(--panel);border-radius:6px;padding:8px 14px;cursor:pointer;font-weight:500;white-space:nowrap}\n.btn:hover{border-color:var(--accent)}\n.btn.primary{background:var(--cta);border-color:var(--cta);color:var(--cta-ink);font-weight:700}\n.btn.primary:hover{filter:brightness(1.06)}\n.btn.ghost{background:transparent}\n.btn:disabled{opacity:.5;cursor:not-allowed}\n.btn.sm{padding:4px 9px;font-size:12px}\n.wrap{display:grid;grid-template-columns:minmax(370px,460px) 1fr;min-height:calc(100% - 60px)}\n.side{background:var(--panel);border-right:1px solid var(--line);padding:18px 18px 60px;overflow:auto;max-height:calc(100vh - 60px);position:sticky;top:60px}\n.stage{padding:24px;overflow:auto;min-width:0}\n.step{margin-bottom:22px}\n.step h2{font-size:13px;letter-spacing:.06em;color:var(--accent);margin:0 0 8px;display:flex;align-items:center;gap:8px}\n.step h2 .n{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--accent);color:var(--panel);font-size:11px}\n.drop{border:2px dashed var(--line);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s, background .15s}\n.drop:hover,.drop.over{border-color:var(--cta);background:var(--accent-soft)}\n.drop strong{display:block;font-size:15px}\n.drop small{color:var(--muted)}\n.bin{margin-top:12px;border:1px solid var(--line);border-radius:8px;overflow:hidden}\n.bin-h{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 10px;background:var(--accent-soft);font-size:12px;font-weight:700}\n.bin-h em{font-style:normal;font-weight:500;color:var(--muted)}\n.bin ul{list-style:none;margin:0;padding:0}\n.bin li{display:flex;align-items:center;gap:6px;padding:6px 10px;border-top:1px solid var(--line);font-size:12px;flex-wrap:wrap}\n.bin li .nm{flex:1;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.bin li img{width:44px;height:32px;object-fit:cover;border-radius:3px;border:1px solid var(--line)}\n.bin li select,.bin li input[type=text]{font-size:12px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel)}\n.bin li input.cap{flex-basis:100%;margin-left:50px}\n.bin .empty{padding:8px 10px;color:var(--muted);font-size:12px;border-top:1px solid var(--line)}\n.bin li .ri{flex-basis:100%;font-size:11px;line-height:1.45;padding-left:2px}\n.bin li .pgsel{width:58px;padding:2px 5px;font-size:11px;border:1px solid var(--line);border-radius:4px}\n.sheet .wavg{font-size:.86em;font-weight:500;color:#333}\n.sheet.docp{display:flex;align-items:center;justify-content:center;padding:22px;background:#fff}\n.sheet.docp img{max-width:100%;max-height:100%;object-fit:contain;box-shadow:0 0 0 1px #d6d6d6}\n.sheet.docp .docload{color:#888;font-size:18px}\n.sheet.docp .docbadge{position:absolute;right:18px;bottom:16px;background:rgba(31,58,95,.93);color:#fff;font-size:17px;line-height:1.45;padding:8px 14px;border-radius:6px;text-align:right}\n.sheet.docp .docbadge small{font-size:13px;opacity:.9}\n.order{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin:0 0 14px}\n.order>summary{cursor:pointer;padding:10px 14px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;list-style:none}\n.order>summary::-webkit-details-marker{display:none}\n.order>summary::before{content:\"▸\";color:var(--muted)}\n.order[open]>summary::before{content:\"▾\"}\n.order-body{padding:0 14px 12px}\n.order-body>.note{margin:0 0 6px}\n.order-list{list-style:none;margin:0 0 10px;padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}\n.order-list li{display:flex;align-items:center;gap:8px;padding:6px 8px;border-top:1px solid var(--line);background:var(--panel);font-size:13px}\n.order-list li:first-child{border-top:0}\n.order-list li .grip{width:16px;flex:none;color:var(--muted);cursor:grab;user-select:none;text-align:center;letter-spacing:-2px}\n.order-list li .no{min-width:48px;flex:none;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}\n.order-list li img,.order-list li .ph0{width:42px;height:32px;flex:none;object-fit:cover;border:1px solid var(--line);border-radius:3px;background:var(--bg);display:inline-grid;place-items:center;font-size:16px}\n.order-list li .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.order-list li select{font-size:12px;max-width:112px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--ink)}\n.order-list li .kind{font-size:12px;color:var(--muted);min-width:56px;text-align:center}\n.order-list li.fixed{background:var(--bg)}\n.order-list li.fixed .grip{cursor:default}\n.order-list li.off{opacity:.6}\n.order-list li.sep{background:var(--bg);color:var(--muted);font-size:12px;padding:5px 10px}\n.order-list li.dragging{opacity:.4}\n.order-list li.drop-before{box-shadow:inset 0 3px 0 var(--cta)}\n.order-list li.drop-after{box-shadow:inset 0 -3px 0 var(--cta)}\n.memo-h{display:flex;align-items:flex-end;justify-content:space-between;gap:8px;margin-bottom:4px}\n.memo-h label.f{margin:0}\n.memo-h .note{font-weight:400;margin-left:4px}\n.btn.mic{flex:none;white-space:nowrap}\n.btn.mic.rec{background:#fee2e2;border-color:#ef4444;color:#b91c1c}\n.mic-live{font-size:12px;color:var(--muted);line-height:1.5}\n.mic-live:not(:empty){padding:4px 2px 0}\n.memo-foot{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin:6px 0 10px}\n.memo-foot .note{margin:0;font-size:12px;line-height:1.55}\n.memo-foot .btn{flex:none;white-space:nowrap}\n.bin li .ri.ok{color:var(--ok)}\n.bin li .ri.ng{color:var(--bad)}\n.ic{border:none;background:none;cursor:pointer;padding:2px 4px;color:var(--muted);font-size:13px;line-height:1}\n.ic:hover{color:var(--ink)}\n.ic.on{color:var(--cta);font-weight:700}\n.ic:disabled{opacity:.3;cursor:default}\n.tag{font-size:10px;padding:1px 6px;border-radius:8px;background:var(--accent-soft);color:var(--accent)}\n.tag.on{background:var(--cta);color:var(--cta-ink)}\nlabel.f{display:block;font-size:12px;color:var(--muted);margin:8px 0 3px}\n.in,textarea.in,select.in{width:100%;border:1px solid var(--line);border-radius:6px;padding:6px 8px;background:var(--panel)}\ntextarea.in{resize:vertical;min-height:60px}\n.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}\n.grid3{display:grid;grid-template-columns:1.25fr 1.1fr .75fr;gap:0 8px}\n.go{width:100%;padding:13px;font-size:16px;margin-top:10px}\n.chk{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted);margin-top:8px;cursor:pointer}\n.status{margin-top:10px;font-size:12px;border-radius:8px;padding:10px 12px;background:var(--accent-soft);display:none}\n.status.show{display:block}\n.status ol{margin:4px 0 0;padding-left:18px}\n.status li.done{color:var(--ok)}\n.status li.run{font-weight:700}\n.status li.err{color:var(--bad)}\n.status li.skip{color:var(--muted)}\ndetails.sec{border:1px solid var(--line);border-radius:8px;margin-bottom:8px;background:var(--panel)}\ndetails.sec>summary{cursor:pointer;padding:9px 12px;font-weight:700;font-size:13px;list-style:none;display:flex;justify-content:space-between;gap:8px}\ndetails.sec>summary::-webkit-details-marker{display:none}\ndetails.sec>summary::after{content:\"＋\";color:var(--muted)}\ndetails.sec[open]>summary::after{content:\"－\"}\ndetails.sec .body{padding:2px 12px 12px}\n.fld.unc .in{border-color:var(--warn);background:var(--warn-soft)}\n.fld .hint{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.45}\n.fld.unc .hint{color:var(--warn)}\n.chip{display:inline-block;font-size:10px;padding:1px 6px;border-radius:9px;margin-left:6px;vertical-align:1px;background:var(--accent-soft);color:var(--accent)}\n.chip.ai{background:var(--warn-soft);color:var(--warn)}\n.chip.web{background:var(--ok-soft);color:var(--ok)}\n.chip.doc{background:#e8eefc;color:#2a4a9b}\n.ex-row{display:grid;grid-template-columns:minmax(90px,34%) 1fr auto;gap:6px;align-items:center;margin-top:6px}\n.ex-row .hint{grid-column:1/-1}\n.bin li .dk{font-size:15px;line-height:1}\n.drop-more{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 4px}\n.drop-more .note{font-size:11px}\n.ver{font-size:10.5px;color:var(--muted);margin-left:6px;white-space:nowrap}\n.linkbox{display:flex;gap:6px;margin-top:8px}\n.linkbox input{flex:1;min-width:0;font-size:12px}\n#pasteBox .mbox{max-width:640px}\n#pasteBox .pg-body textarea{width:100%;min-height:220px}\n.legend{font-size:11px;color:var(--muted);margin:4px 0 10px}\n.note{font-size:12px;color:var(--muted)}\n.intern{font-size:12px;background:var(--accent-soft);border-radius:6px;padding:8px 10px;white-space:pre-wrap}\n.qcard{border:1px solid var(--warn);background:var(--warn-soft);border-radius:8px;padding:10px 12px;margin-bottom:10px}\n.qcard h3{margin:0 0 6px;font-size:13px}\n.q{border-top:1px dashed var(--line);padding:8px 0 4px}\n.q:first-of-type{border-top:none}\n.q p{margin:0 0 6px;font-size:13px}\n.q .opts{display:flex;flex-wrap:wrap;gap:6px}\n.q .row{display:flex;gap:6px;margin-top:6px}\n.q .row input{flex:1}\n.facts{font-size:12px}\n.facts table{width:100%;border-collapse:collapse;margin:4px 0 8px}\n.facts td,.facts th{border-bottom:1px solid var(--line);padding:3px 4px;text-align:left;vertical-align:top}\n.facts th{color:var(--muted);font-weight:500;white-space:nowrap;width:1%}\n.facts td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}\n.toolbar{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}\n.toolbar .note{flex:1;text-align:right}\n.banner{background:var(--warn-soft);color:var(--ink);border:1px solid var(--warn);border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:14px}\n.banner.bad{background:var(--bad-soft);border-color:var(--bad)}\n.pages{display:flex;flex-direction:column;align-items:center;gap:26px}\n.pg-wrap{position:relative}\n.pg-tag{position:absolute;left:-2px;top:-20px;font-size:11px;color:var(--muted)}\n.pg-scale{transform-origin:top left}\n.pg-box{box-shadow:0 2px 14px rgba(0,0,0,.18);background:#fff}\n.toggles{display:flex;flex-direction:column;gap:4px;font-size:13px}\n.toggles label{display:flex;gap:6px;align-items:center;cursor:pointer}\n.toggles select{font-size:12px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel)}\n.toast{position:fixed;right:20px;bottom:20px;background:var(--ink);color:var(--panel);padding:10px 14px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none;max-width:440px;z-index:40}\n.toast.show{opacity:1;transform:none}\n.busy{position:fixed;inset:0;background:var(--bg);z-index:30;display:none;place-items:center;text-align:center}\n.busy.show{display:grid}\n.busy b{display:block;font-size:18px;margin-bottom:6px}\n.busy span{color:var(--muted)}\n/* 計測モーダル */\n.modal{position:fixed;inset:0;background:rgba(10,14,20,.55);z-index:35;display:none;align-items:center;justify-content:center;padding:16px}\n.modal.show{display:flex}\n.pg-guide{max-width:620px;width:100%}\n.pg-guide .mtop{display:flex;align-items:center;justify-content:space-between;gap:10px}\n.pg-body{padding:6px 18px 18px;line-height:1.75;font-size:14px}\n.pg-body ul{margin:8px 0 10px;padding-left:20px}\n.pg-body li{margin:6px 0}\n.pcbadge{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:999px;background:#e8f0fb;color:#1f3a5f;font:700 11px/1.6 var(--f-body, sans-serif);letter-spacing:.04em;vertical-align:middle}\n#aiSet[hidden]{display:none!important}\n#aiSet .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}\n#aiKeyState{font-weight:700;font-size:12.5px;margin:2px 0 6px}\n#coDist[hidden],#coLinkBox[hidden]{display:none!important}\n#coDist{margin-top:14px;padding-top:12px;border-top:1px dashed var(--line)}\n.dist-h{font-size:13.5px;margin:0 0 2px}\n#printArea{display:none}\n@media print{\n  @page{size:A4 portrait;margin:0}\n  html,body{background:#fff!important;margin:0!important;padding:0!important}\n  body>*:not(#printArea){display:none!important}\n  #printArea{display:block!important}\n  #printArea .pp{width:210mm;height:296mm;overflow:hidden;break-after:page;page-break-after:always;break-inside:avoid}\n  #printArea .pp:last-child{break-after:auto;page-break-after:auto}\n  #printArea .pp img{width:100%;height:100%;object-fit:contain;display:block}\n}\n.mbox{background:var(--panel);border-radius:10px;width:min(1100px,100%);max-height:100%;display:flex;flex-direction:column;overflow:hidden}\n.mtop,.mbot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid var(--line);font-size:13px}\n.mbot{border-bottom:none;border-top:1px solid var(--line)}\n.mtop b{font-size:15px}\n.mtop input,.mbot input,.mtop select{width:80px;border:1px solid var(--line);border-radius:4px;padding:3px 6px;background:var(--panel)}\n.mtop select{width:auto;max-width:260px}\n.mcv{overflow:auto;flex:1;min-height:200px;background:#f4f4f4}\n.mcv canvas{display:block;cursor:crosshair}\n.mres{font-weight:700;font-size:15px;color:var(--cta)}\n@media (max-width:900px){.wrap{grid-template-columns:1fr}.side{position:static;max-height:none;border-right:none}}\n@media (prefers-reduced-motion:reduce){*{transition:none!important}}\n\n/* ===== 印刷シート（常に白い紙） ===== */\n.sheet{width:794px;height:1123px;background:#fff;color:#111;position:relative;overflow:hidden;font-family:\"Noto Sans JP\",sans-serif;--fs:11.2px;font-size:var(--fs)}\n.sheet.land{width:1123px;height:794px}\n.s1{padding:28px 34px 24px;display:flex;flex-direction:column;gap:7px}\n.catch{border:1.5px solid #1f3a5f;background:#eef4fb;padding:8px 12px 9px;line-height:1.55;position:relative}\n.catch::before{content:\"\";position:absolute;inset:2px;border:1px solid #c9d8ea;pointer-events:none}\n.catch .t{font-weight:900;color:#1f3a5f;font-size:calc(var(--fs) * 1.36);text-align:center}\n.catch .l{font-weight:500;font-size:calc(var(--fs) * 1.06);text-align:center}\n.pts{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;margin-top:7px;padding-top:7px;border-top:1px dashed #9db3cf;position:relative}\n.pt{display:flex;gap:6px;align-items:flex-start;line-height:1.45;font-size:calc(var(--fs) * .93)}\n.pt b{flex:none;background:#1f3a5f;color:#fff;font-size:calc(var(--fs) * .78);padding:1px 6px;border-radius:2px;margin-top:2px;letter-spacing:.04em;min-width:52px;text-align:center}\n.s-title{text-align:center;font-family:\"Noto Serif JP\",serif;font-weight:800;font-size:calc(var(--fs) * 1.8);letter-spacing:.5em;margin:0 0 -1px;padding-left:.5em}\ntable.gai{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;border:1.6px solid #111}\ntable.gai td{border:0;border-right:.8px solid #333;border-bottom:.8px solid #333;padding:2px 6px;vertical-align:middle;line-height:1.38;height:calc(var(--fs) * 1.8)}\ntable.gai td.cat{width:76px;text-align:center;font-weight:700;background:#1f3a5f;color:#fff;letter-spacing:.3em;padding-left:.3em;border-bottom-color:#6d84a3}\ntable.gai td.sub{width:92px;text-align:center;background:#f2f5f9;color:#222;font-weight:500;letter-spacing:.12em}\ntable.gai td.sub2{text-align:center;background:#f2f5f9;letter-spacing:.12em}\ntable.gai td.sub.exl{letter-spacing:0;font-size:.9em;line-height:1.25}\ntable.gai td.v{font-weight:500}\ntable.gai td.c{text-align:center;font-weight:500}\ntable.gai td.name{font-size:calc(var(--fs) * 1.45);font-weight:700;letter-spacing:.04em}\ntable.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:center;letter-spacing:.12em;color:#c2410c}\n.cn{display:inline-block;width:1.15em;text-align:left}\n.ar{display:flex;align-items:baseline;gap:4px;justify-content:center;font-variant-numeric:tabular-nums}\n.ar .k{font-weight:700;min-width:72px;text-align:right}\n.ar .t{color:#333}\n.tr-row{display:grid;grid-template-columns:1.25fr 1fr .55fr;gap:6px}\n.tr-row span:nth-child(3){text-align:right;font-weight:700}\n.rmk{display:flex;flex:1;min-height:56px;border:1.6px solid #111;border-top-width:0;margin-top:-7px}\n.rmk .cat{width:76px;flex:none;display:flex;align-items:center;justify-content:center;background:#1f3a5f;color:#fff;font-weight:700;letter-spacing:.3em;padding-left:.3em}\n.rmk .body{padding:7px 12px;line-height:1.65;white-space:pre-wrap;flex:1;font-weight:500}\n.foot{display:grid;grid-template-columns:1fr 1.15fr;border:1.6px solid #111;margin-top:4px}\n.foot .a{padding:7px 12px;border-right:1px solid #111;display:flex;flex-direction:column;justify-content:space-between;gap:3px}\n.foot .a .lic{font-size:calc(var(--fs) * .92)}\n.foot .a .assoc{font-size:calc(var(--fs) * .78);color:#333;white-space:pre-wrap;line-height:1.45}\n.foot .a .co{font-size:calc(var(--fs) * 1.55);font-weight:900;letter-spacing:.08em}\n.foot .a .co .br{font-size:.66em;margin-left:.6em;letter-spacing:.12em}\n.foot .a .lixil{display:inline-block;background:#e2580e;color:#fff;font-size:calc(var(--fs) * .72);font-weight:700;padding:1px 6px;letter-spacing:.06em;align-self:flex-start}\n.foot .b{padding:6px 10px 6px 12px;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}\n.foot .b .tel{color:#c2410c;font-weight:900;font-size:calc(var(--fs) * 1.6);letter-spacing:.06em;line-height:1.2}\n.foot .b .ln{font-size:calc(var(--fs) * .88);line-height:1.5}\n.foot .b .qr{text-align:center;font-size:calc(var(--fs) * .72)}\n.foot .b .qr img{width:66px;height:66px;display:block;image-rendering:pixelated}\n.hl .unc{background:#fff0c2;box-shadow:inset 0 -2px 0 #e0a52b}\n.sheet.photo{background:#111}\n.sheet .bgimg{position:absolute;inset:0;background-size:cover;background-position:center}\n.sheet.mapp,.sheet.ph{display:flex;flex-direction:column;padding:26px 30px 22px}\n.mhead{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;border-bottom:2px solid #1f3a5f;padding-bottom:5px;margin-bottom:12px}\n.mhead b{font-size:20px;color:#1f3a5f;letter-spacing:.2em;white-space:nowrap}\n.mhead span{font-size:11px;color:#555;text-align:right}\n.mbody{flex:1;display:flex;align-items:center;justify-content:center;min-height:0}\n.mbody img{max-width:100%;max-height:100%;display:block}\n.mfoot{font-size:10px;color:#666;text-align:right;margin-top:8px}\n.phbox{flex:1;display:grid;gap:8px;min-height:0}\n.phc{position:relative;background-size:cover;background-position:center;background-color:#e9ecef;min-height:0}\n.phc span{position:absolute;left:0;bottom:0;background:rgba(17,24,39,.74);color:#fff;font-size:11px;padding:3px 9px;letter-spacing:.04em;max-width:100%}\n.phbox.L5{grid-template-columns:1fr 1fr;grid-template-rows:1.6fr 1fr 1fr}\n.phbox.L5 .c0{grid-column:1/3}\n.phbox.P5{grid-template-columns:1.2fr 1fr;grid-template-rows:1fr 1fr .95fr}\n.phbox.P5 .c0{grid-row:1/3}\n.phbox.L4{grid-template-columns:1fr 1fr 1fr;grid-template-rows:1.7fr 1fr}\n.phbox.L4 .c0{grid-column:1/4}\n.phbox.P4{grid-template-columns:1.25fr 1fr;grid-template-rows:1fr 1fr 1fr}\n.phbox.P4 .c0{grid-row:1/4}\n.phbox.L3,.phbox.P3{grid-template-columns:1fr 1fr;grid-template-rows:1.6fr 1fr}\n.phbox.L3 .c0,.phbox.P3 .c0{grid-column:1/3}\n.phbox.L2,.phbox.P2{grid-template-columns:1fr;grid-template-rows:1.4fr 1fr}\n.phbox.L1,.phbox.P1{grid-template-columns:1fr;grid-template-rows:1fr}\n.phbox.G6{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr 1fr}\n\u003c/style>\n\u003c/head>\n\u003cbody>\n\u003cheader class=\"top\">\n  \u003cdiv class=\"brand\">\u003cb>物件資料メーカー\u003c/b>\u003cspan>株式会社大央ハウジング｜登記簿・物件レポート・地図・写真から物件概要書を自動作成\u003c/span>\u003c/div>\n  \u003cspan class=\"aichip\" id=\"aiChip\" role=\"status\">AI：確認中…\u003c/span>\n  \u003cdiv class=\"sp\">\u003c/div>\n  \u003cbutton class=\"btn ghost\" id=\"btnNew\" type=\"button\">新しい物件を作る\u003c/button>\n  \u003cbutton class=\"btn ghost\" id=\"btnPdf\" type=\"button\">PDFで書き出す\u003c/button>\n  \u003cbutton class=\"btn primary\" id=\"btnPrint\" type=\"button\">🖨 印刷する\u003c/button>\n\u003c/header>\n\u003cdiv class=\"wrap\">\n  \u003caside class=\"side\">\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">1\u003c/span>資料をまとめてドロップ\u003c/h2>\n      \u003cdiv class=\"drop\" id=\"drop\" tabindex=\"0\" role=\"button\" aria-label=\"ファイルを選択\">\n        \u003cstrong>登記簿・物件レポート・公図・地図・写真・その他の資料\u003c/strong>\n        \u003csmall>PDF・画像・Word・Excel・CSV・テキストを何件でも一度に。他社の販売図面やポータルの物件ページも読み取ります\u003c/small>\n        \u003cinput type=\"file\" id=\"file\" multiple accept=\".pdf,application/pdf,image/*,.docx,.docm,.xlsx,.xlsm,.pptx,.csv,.tsv,.txt,.md,.html,.htm,.eml,.json\" hidden>\n      \u003c/div>\n      \u003cdiv class=\"drop-more\">\u003cbutton class=\"btn sm\" id=\"btnPasteText\" type=\"button\">文章を貼り付けて読み込む\u003c/button>\u003cspan class=\"note\">画面写し（スクリーンショット）や文章は Ctrl+V（Macは⌘+V）でも入れられます\u003c/span>\u003c/div>\n      \u003cdiv id=\"bins\">\u003c/div>\n    \u003c/section>\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">2\u003c/span>備考メモ（話すだけでOK）と自動作成\u003c/h2>\n      \u003cdiv class=\"memo-h\">\n        \u003clabel class=\"f\" for=\"memo\">備考メモ \u003cspan class=\"note\">（思いついた順でOK）\u003c/span>\u003c/label>\n        \u003cbutton class=\"btn sm mic\" id=\"btnMic\" type=\"button\" hidden aria-pressed=\"false\">🎤 話して入力\u003c/button>\n      \u003c/div>\n      \u003ctextarea class=\"in\" id=\"memo\" rows=\"5\" placeholder=\"例）えーと、この物件は借地権で、地代は年間30万円かかります。あと雨漏りの箇所がいくつかあって、旧耐震の建物です。現況は賃貸中で、引渡しはご相談で。\">\u003c/textarea>\n      \u003cdiv class=\"mic-live\" id=\"micLive\" aria-live=\"polite\">\u003c/div>\n      \u003cdiv class=\"memo-foot\">\n        \u003cp class=\"note\">「物件資料を自動作成」を押すと、AIが備考欄に箇条書きで整理します。借地権・現況などは概要の欄にも反映します。\u003cspan id=\"micKbd\" hidden>スマホ・タブレットでは、キーボードのマイク（音声入力）で話して入力できます。\u003c/span>\u003c/p>\n        \u003cbutton class=\"btn sm\" id=\"btnTidy\" type=\"button\">備考だけ整理する\u003c/button>\n      \u003c/div>\n      \u003clabel class=\"f\" for=\"memoPrice\">売出価格（空欄ならレポートの想定価格）\u003c/label>\u003cinput class=\"in\" id=\"memoPrice\" placeholder=\"例）7億5,000万円\">\n      \u003cdiv class=\"grid2\">\n        \u003cdiv>\u003clabel class=\"f\" for=\"memoOffice\">帯（店舗）\u003c/label>\u003cselect class=\"in\" id=\"memoOffice\">\u003c/select>\u003c/div>\n        \u003cdiv>\u003clabel class=\"f\" for=\"memoTanto\">担当者 \u003cspan class=\"note\">（手入力できます）\u003c/span>\u003c/label>\u003cinput class=\"in\" id=\"memoTanto\" list=\"tantoList\" autocomplete=\"off\" placeholder=\"例）山田太郎 090-1234-5678\">\u003cdatalist id=\"tantoList\">\u003c/datalist>\u003c/div>\n      \u003c/div>\n      \u003clabel class=\"chk\">\u003cinput type=\"checkbox\" id=\"hiAcc\" checked> 高精度モード（時間はかかりますが、より慎重に読み取ります）\u003c/label>\n      \u003cbutton class=\"btn primary go\" id=\"btnGen\" type=\"button\">物件資料を自動作成\u003c/button>\n      \u003cdiv class=\"status\" id=\"status\" aria-live=\"polite\">\u003c/div>\n      \u003cdetails class=\"sec\" style=\"margin-top:12px\" id=\"webSec\">\n        \u003csummary>ネットの情報で裏付ける（任意）\u003c/summary>\n        \u003cdiv class=\"body\">\n          \u003cp class=\"note\" style=\"margin:6px 0 8px\">このアプリのAIはインターネットを直接検索できません。ネットで裏付けたいときは、指示文をコピーして Claude に貼り付け、返ってきた回答をここへ貼り付けてください。キャッチコピー・アピールポイント・交通・学校区に反映します。\u003c/p>\n          \u003cdiv style=\"display:flex;gap:8px;flex-wrap:wrap;align-items:center\">\u003cbutton class=\"btn sm\" id=\"btnCopyPrompt\" type=\"button\">調査の指示文をコピー\u003c/button>\u003ca href=\"https://claude.ai/new\" target=\"_blank\" rel=\"noopener\" class=\"note\">Claude を開く ↗\u003c/a>\u003c/div>\n          \u003ctextarea class=\"in\" id=\"promptBox\" rows=\"4\" style=\"margin-top:8px;display:none\" readonly>\u003c/textarea>\n          \u003ctextarea class=\"in\" id=\"webPaste\" rows=\"4\" style=\"margin-top:8px\" placeholder=\"Claude の回答をここに貼り付け\">\u003c/textarea>\n          \u003cbutton class=\"btn sm\" id=\"btnImport\" type=\"button\" style=\"margin-top:6px\">回答を取り込む\u003c/button>\n        \u003c/div>\n      \u003c/details>\n      \u003cdetails class=\"sec\" id=\"aiSet\" hidden>\n        \u003csummary>AIの設定（パソコン版）\u003c/summary>\n        \u003cdiv class=\"body\">\n          \u003cp class=\"note\" style=\"margin:6px 0 8px\">AI（物件レポート・公図・地図・その他の資料の読み取り、資料の判別、写真選び、アピールポイントの作成など）を使うには、Anthropic社のAPIキーが必要です。利用料は使った分だけで、標準の高性能モデル（Claude Opus 5.5）では物件資料1件あたり約50円が目安です。キーはこのパソコンのブラウザの中にだけ保存され、AIに読み取りを頼むときだけAnthropic社へ送られます。共用のパソコンでは、使い終わったら「キーを消す」を押してください。\u003c/p>\n          \u003cdiv id=\"aiKeyState\">APIキー：未設定\u003c/div>\n          \u003clabel class=\"f\" for=\"aiKey\">APIキー\u003c/label>\u003cinput class=\"in\" id=\"aiKey\" type=\"password\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"sk-ant-…\">\n          \u003clabel class=\"f\" for=\"aiModel\">AIのモデル\u003c/label>\n          \u003cselect class=\"in\" id=\"aiModel\">\n            \u003coption value=\"\">おすすめ：Claude Opus 5.5（高性能・1件あたり約50円）\u003c/option>\n            \u003coption value=\"claude-sonnet-5-5\">Claude Sonnet 5.5（標準・約半額）\u003c/option>\n            \u003coption value=\"claude-haiku-5-5\">Claude Haiku 5.5（速い・とても安い・精度は下がる）\u003c/option>\n          \u003c/select>\n          \u003cdiv class=\"row\">\u003cbutton class=\"btn sm primary\" id=\"aiSave\" type=\"button\">保存してAIを使う\u003c/button>\u003cbutton class=\"btn sm\" id=\"aiClear\" type=\"button\">キーを消す\u003c/button>\u003c/div>\n          \u003cp class=\"note\" style=\"margin-top:8px\">APIキーは Anthropic のコンソール（platform.claude.com）で発行できます。\u003c/p>\n          \u003cdiv id=\"coDist\" hidden>\n            \u003ch3 class=\"dist-h\">社員に配るリンク・ファイル（AI付き）\u003c/h3>\n            \u003cp class=\"note\" style=\"margin:4px 0 8px\">\u003cb>社員用リンク\u003c/b>：開くだけで、claude.ai のアカウントもAPIキーの入力もなしにAIまで使えるWeb版のリンクです（スマホでも使えます）。\u003cb>社員用ファイル\u003c/b>：同じことができる「物件資料メーカー_社内用.html」です（店舗・担当者の一覧も入ります）。\u003cb>どちらも社外の人には渡さないでください\u003c/b>。リンクやファイルの中のキーは読みにくくしてありますが、完全には隠せません。漏れたときは、Anthropicのコンソールでキーを無効にして作り直してください。\u003c/p>\n            \u003clabel class=\"f\" for=\"coKey\">社員用のAPIキー \u003cspan class=\"note\">（空欄ならこのパソコンのキー。社員用に別のキーを発行するのがおすすめ）\u003c/span>\u003c/label>\n            \u003cinput class=\"in\" id=\"coKey\" type=\"password\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"空欄ならこのパソコンのキーを使います\">\n            \u003cdiv class=\"row\">\u003cbutton class=\"btn sm primary\" id=\"coLink\" type=\"button\">社員用のリンクを作る\u003c/button>\u003cbutton class=\"btn sm\" id=\"coMake\" type=\"button\">社員用のファイルを作る\u003c/button>\u003c/div>\n            \u003cdiv class=\"linkbox\" id=\"coLinkBox\" hidden>\u003cinput class=\"in\" id=\"coLinkOut\" readonly aria-label=\"社員用リンク\">\u003cbutton class=\"btn sm\" id=\"coLinkCopy\" type=\"button\">コピー\u003c/button>\u003c/div>\n          \u003c/div>\n        \u003c/div>\n      \u003c/details>\n    \u003c/section>\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">3\u003c/span>内容の確認・修正\u003c/h2>\n      \u003cdiv class=\"legend\">黄色の項目は推定です。確認した値に書き換えるとすぐプレビューに反映され、黄色が消えます。\u003c/div>\n      \u003cdiv id=\"qbox\">\u003c/div>\n      \u003cdiv id=\"form\">\u003c/div>\n    \u003c/section>\n  \u003c/aside>\n  \u003cmain class=\"stage\">\n    \u003cdiv class=\"toolbar\">\n      \u003cdiv class=\"toggles\">\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgPts\" checked> アピールポイントを載せる\u003c/label>\n        \u003clabel>写真ページ \u003cselect id=\"tgPhoto\">\u003coption value=\"5\">5枚レイアウト\u003c/option>\u003coption value=\"1\">外観1枚（全面）\u003c/option>\u003coption value=\"0\">入れない\u003c/option>\u003c/select>\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgCap\" checked> 写真に説明を入れる\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgMapHead\" checked> 地図ページに見出しを付ける\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgEnhance\" checked> 写真を明るく補正する\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgHl\" checked> 要確認の項目をプレビューで強調（PDFには出ません）\u003c/label>\n      \u003c/div>\n      \u003cdiv class=\"note\" id=\"pageCount\">\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"banner\" id=\"sampleBanner\">いま表示しているのは見本（前島三丁目一棟ビル）です。「新しい物件を作る」を押してから資料を入れてください。\u003c/div>\n    \u003cdiv class=\"banner bad\" id=\"aiBanner\" style=\"display:none\">\u003c/div>\n    \u003cdiv class=\"banner bad\" id=\"errBanner\" style=\"display:none\" role=\"alert\">\u003c/div>\n    \u003cdetails class=\"order\" id=\"orderBox\" open>\n      \u003csummary>\u003cb>資料の順番（PDFの並び）\u003c/b>\u003cspan class=\"note\" id=\"orderMode\">\u003c/span>\u003c/summary>\n      \u003cdiv class=\"order-body\">\n        \u003cp class=\"note\">行をドラッグするか ▲▼ で入れ替えられます。✕ で外した資料はPDFに入りません（「戻す」で元に戻せます）。資料の種類もここで直せます。\u003c/p>\n        \u003col class=\"order-list\" id=\"orderList\">\u003c/ol>\n        \u003cbutton class=\"btn sm\" id=\"orderReset\" type=\"button\">標準の順番に戻す\u003c/button>\n      \u003c/div>\n    \u003c/details>\n    \u003cdiv class=\"pages\" id=\"pages\">\u003c/div>\n  \u003c/main>\n\u003c/div>\n\u003cdiv class=\"modal\" id=\"printGuide\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"pgTitle\">\n  \u003cdiv class=\"mbox pg-guide\">\n    \u003cdiv class=\"mtop\">\u003cb id=\"pgTitle\">印刷用のPDFを用意しました\u003c/b>\u003cspan class=\"sp\">\u003c/span>\u003cbutton class=\"btn sm\" id=\"pgClose\" type=\"button\">閉じる\u003c/button>\u003c/div>\n    \u003cdiv class=\"pg-body\" id=\"pgBody\">\n      \u003cp>保存したPDFを開いて、プリンター（コピー機）を選んで印刷してください。\u003c/p>\n      \u003cul>\n        \u003cli>\u003cb>パソコン：\u003c/b>ダウンロードしたPDFを開き、\u003cb>Ctrl＋P\u003c/b>（Macは\u003cb>⌘＋P\u003c/b>）→ プリンターでコピー機を選んで「印刷」。用紙は\u003cb>A4\u003c/b>、倍率は\u003cb>「実際のサイズ」または「用紙に合わせる」\u003c/b>にしてください。\u003c/li>\n        \u003cli>\u003cb>iPhone・iPad：\u003c/b>表示された共有メニューの\u003cb>「プリント」\u003c/b>から、コピー機を選んで印刷できます（コピー機がAirPrintに対応している場合）。\u003c/li>\n      \u003c/ul>\n      \u003cp class=\"note\">このアプリはclaude.aiの安全な枠の中で動いているため、ページから直接プリンターの画面を開くことができません。そのため、印刷用のPDFを保存してから印刷する流れになっています。\u003c/p>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv class=\"modal\" id=\"measure\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"msTitle\">\n  \u003cdiv class=\"mbox\">\n    \u003cdiv class=\"mtop\">\n      \u003cb id=\"msTitle\">図面で測る\u003c/b>\n      \u003cselect id=\"msMap\" aria-label=\"図面\">\u003c/select>\n      \u003cspan id=\"msScaleWrap\">縮尺 1/\u003cinput id=\"msDen\" type=\"number\" min=\"50\" step=\"50\" value=\"500\" aria-label=\"縮尺の分母\">\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msZoomOut\" type=\"button\" aria-label=\"縮小\">－\u003c/button>\n      \u003cbutton class=\"btn sm\" id=\"msZoomIn\" type=\"button\" aria-label=\"拡大\">＋\u003c/button>\n      \u003cspan class=\"note\" id=\"msInfo\">\u003c/span>\n      \u003cspan style=\"flex:1\">\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msClose\" type=\"button\">閉じる\u003c/button>\n    \u003c/div>\n    \u003cdiv class=\"mcv\" id=\"msWrap\">\u003ccanvas id=\"msCanvas\">\u003c/canvas>\u003c/div>\n    \u003cdiv class=\"mbot\">\n      \u003cspan class=\"note\">2点をクリックすると距離を測ります。\u003c/span>\n      \u003cspan class=\"mres\" id=\"msRes\">—\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msToFront\" type=\"button\" disabled>間口に入れる\u003c/button>\n      \u003cbutton class=\"btn sm\" id=\"msToRoad\" type=\"button\" disabled>道路幅員に入れる\u003c/button>\n      \u003cspan class=\"note\">｜縮尺が分からない図面は、縮尺バーなど長さの分かる2点を測って\u003c/span>\n      \u003cinput id=\"msLen\" type=\"number\" step=\"0.1\" placeholder=\"長さm\" aria-label=\"既知の長さ（メートル）\">\n      \u003cbutton class=\"btn sm\" id=\"msCalib\" type=\"button\" disabled>で校正\u003c/button>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv id=\"offscreen\" style=\"position:fixed;left:0;top:0;z-index:-10;pointer-events:none\" aria-hidden=\"true\">\u003c/div>\n\u003cdiv class=\"busy\" id=\"busy\">\u003cdiv>\u003cb>PDFを作成しています\u003c/b>\u003cspan>ページ数が多いと数十秒かかります\u003c/span>\u003c/div>\u003c/div>\n\u003cdiv class=\"modal\" id=\"pasteBox\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"pbTitle\">\n  \u003cdiv class=\"mbox pg-guide\">\n    \u003cdiv class=\"mtop\">\u003cb id=\"pbTitle\">文章を貼り付けて読み込む\u003c/b>\u003cspan class=\"sp\">\u003c/span>\u003cbutton class=\"btn sm\" id=\"pbClose\" type=\"button\">閉じる\u003c/button>\u003c/div>\n    \u003cdiv class=\"pg-body\">\n      \u003cp class=\"note\" style=\"margin:0 0 8px\">グーホーム・うちなーらいふなどの物件ページや、他社から届いたメール・資料の文章を貼り付けてください。ページを開いて Ctrl+A（すべて選ぶ）→ Ctrl+C（コピー）→ ここに Ctrl+V で入ります。写真は画面写しで入れてください。\u003c/p>\n      \u003clabel class=\"f\" for=\"pbName\">資料の名前（任意）\u003c/label>\u003cinput class=\"in\" id=\"pbName\" placeholder=\"例）グーホームの物件ページ\">\n      \u003clabel class=\"f\" for=\"pbText\">文章\u003c/label>\u003ctextarea class=\"in\" id=\"pbText\" placeholder=\"ここに貼り付け\">\u003c/textarea>\n      \u003cdiv style=\"display:flex;gap:8px;margin-top:10px\">\u003cbutton class=\"btn primary\" id=\"pbOk\" type=\"button\">読み込む\u003c/button>\u003c/div>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv class=\"toast\" id=\"toast\" role=\"status\">\u003c/div>\n\u003cdiv id=\"printArea\" aria-hidden=\"true\">\u003c/div>\n@@APP_SCRIPTS@@\n\u003c/body>\n\u003c/html>\n";</script>
+<script data-app="shell">window.__SHELL="\u003c!DOCTYPE html>\n\u003chtml lang=\"ja\">\n\u003chead>\n\u003cmeta charset=\"utf-8\">\n\u003cmeta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\u003cmeta name=\"robots\" content=\"noindex,nofollow\">\n\u003ctitle>大央ハウジング 物件資料メーカー\u003c/title>\n\u003clink rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n\u003clink rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n\u003clink href=\"https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Serif+JP:wght@600;800&display=swap\" rel=\"stylesheet\">\n\u003cstyle>\n/* Layout: left = 資料投入・確認 / right = A4プレビュー（印刷物そのもの） */\n:root{\n  --bg:#eef1f4; --panel:#ffffff; --ink:#1b2430; --muted:#5d6977; --line:#d6dde4;\n  --accent:#1f3a5f; --accent-soft:#e3eaf3; --cta:#e2580e; --cta-ink:#fff;\n  --warn:#b7791f; --warn-soft:#fdf3dd; --ok:#2f7d4f; --ok-soft:#e2f2e8; --bad:#b42318; --bad-soft:#fde8e6;\n  --f-body:\"Noto Sans JP\",\"Hiragino Sans\",\"Yu Gothic\",sans-serif;\n  --f-display:\"Noto Serif JP\",\"Hiragino Mincho ProN\",\"Yu Mincho\",serif;\n  color-scheme:light;\n}\n@media (prefers-color-scheme: dark){\n  :root:not([data-theme=\"light\"]){\n    --bg:#12171d; --panel:#1b222b; --ink:#e7ecf1; --muted:#9aa7b4; --line:#2e3844;\n    --accent:#8db4e2; --accent-soft:#223246; --cta:#f07a35; --cta-ink:#1a0f08;\n    --warn:#e8b45a; --warn-soft:#3a2f1a; --ok:#6fcf97; --ok-soft:#1d3427; --bad:#f19a8f; --bad-soft:#3b1f1c; color-scheme:dark;\n  }\n}\n:root[data-theme=\"dark\"]{\n  --bg:#12171d; --panel:#1b222b; --ink:#e7ecf1; --muted:#9aa7b4; --line:#2e3844;\n  --accent:#8db4e2; --accent-soft:#223246; --cta:#f07a35; --cta-ink:#1a0f08;\n  --warn:#e8b45a; --warn-soft:#3a2f1a; --ok:#6fcf97; --ok-soft:#1d3427; --bad:#f19a8f; --bad-soft:#3b1f1c; color-scheme:dark;\n}\n*{box-sizing:border-box}\nhtml,body{height:100%;margin:0}\nbody{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:14px;line-height:1.55}\nbutton,input,select,textarea{font:inherit;color:inherit}\n:focus-visible{outline:2px solid var(--cta);outline-offset:2px}\na{color:var(--accent)}\n.top{display:flex;align-items:center;gap:14px;padding:10px 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}\n.brand{display:flex;flex-direction:column;line-height:1.25}\n.brand b{font-family:var(--f-display);font-size:18px;letter-spacing:.04em}\n.brand span{font-size:11px;color:var(--muted)}\n.top .sp{flex:1}\n.aichip{font-size:12px;padding:4px 10px;border-radius:12px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}\n.aichip.full{background:var(--ok-soft);color:var(--ok)}\n.aichip.text,.aichip.none{background:var(--bad-soft);color:var(--bad)}\n.btn{border:1px solid var(--line);background:var(--panel);border-radius:6px;padding:8px 14px;cursor:pointer;font-weight:500;white-space:nowrap}\n.btn:hover{border-color:var(--accent)}\n.btn.primary{background:var(--cta);border-color:var(--cta);color:var(--cta-ink);font-weight:700}\n.btn.primary:hover{filter:brightness(1.06)}\n.btn.ghost{background:transparent}\n.btn:disabled{opacity:.5;cursor:not-allowed}\n.btn.sm{padding:4px 9px;font-size:12px}\n.wrap{display:grid;grid-template-columns:minmax(370px,460px) 1fr;min-height:calc(100% - 60px)}\n.side{background:var(--panel);border-right:1px solid var(--line);padding:18px 18px 60px;overflow:auto;max-height:calc(100vh - 60px);position:sticky;top:60px}\n.stage{padding:24px;overflow:auto;min-width:0}\n.step{margin-bottom:22px}\n.step h2{font-size:13px;letter-spacing:.06em;color:var(--accent);margin:0 0 8px;display:flex;align-items:center;gap:8px}\n.step h2 .n{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--accent);color:var(--panel);font-size:11px}\n.drop{border:2px dashed var(--line);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s, background .15s}\n.drop:hover,.drop.over{border-color:var(--cta);background:var(--accent-soft)}\n.drop strong{display:block;font-size:15px}\n.drop small{color:var(--muted)}\n.bin{margin-top:12px;border:1px solid var(--line);border-radius:8px;overflow:hidden}\n.bin-h{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 10px;background:var(--accent-soft);font-size:12px;font-weight:700}\n.bin-h em{font-style:normal;font-weight:500;color:var(--muted)}\n.bin ul{list-style:none;margin:0;padding:0}\n.bin li{display:flex;align-items:center;gap:6px;padding:6px 10px;border-top:1px solid var(--line);font-size:12px;flex-wrap:wrap}\n.bin li .nm{flex:1;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.bin li img{width:44px;height:32px;object-fit:cover;border-radius:3px;border:1px solid var(--line)}\n.bin li select,.bin li input[type=text]{font-size:12px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel)}\n.bin li input.cap{flex-basis:100%;margin-left:50px}\n.bin .empty{padding:8px 10px;color:var(--muted);font-size:12px;border-top:1px solid var(--line)}\n.bin li .ri{flex-basis:100%;font-size:11px;line-height:1.45;padding-left:2px}\n.bin li .pgsel{width:58px;padding:2px 5px;font-size:11px;border:1px solid var(--line);border-radius:4px}\n.sheet .wavg{font-size:.86em;font-weight:500;color:#333}\n.sheet.docp{display:flex;align-items:center;justify-content:center;padding:22px;background:#fff}\n.sheet.docp img{max-width:100%;max-height:100%;object-fit:contain;box-shadow:0 0 0 1px #d6d6d6}\n.sheet.docp .docload{color:#888;font-size:18px}\n.sheet.docp .docbadge{position:absolute;right:18px;bottom:16px;background:rgba(31,58,95,.93);color:#fff;font-size:17px;line-height:1.45;padding:8px 14px;border-radius:6px;text-align:right}\n.sheet.docp .docbadge small{font-size:13px;opacity:.9}\n.order{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin:0 0 14px}\n.order>summary{cursor:pointer;padding:10px 14px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;list-style:none}\n.order>summary::-webkit-details-marker{display:none}\n.order>summary::before{content:\"▸\";color:var(--muted)}\n.order[open]>summary::before{content:\"▾\"}\n.order-body{padding:0 14px 12px}\n.order-body>.note{margin:0 0 6px}\n.order-list{list-style:none;margin:0 0 10px;padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}\n.order-list li{display:flex;align-items:center;gap:8px;padding:6px 8px;border-top:1px solid var(--line);background:var(--panel);font-size:13px}\n.order-list li:first-child{border-top:0}\n.order-list li .grip{width:16px;flex:none;color:var(--muted);cursor:grab;user-select:none;text-align:center;letter-spacing:-2px}\n.order-list li .no{min-width:48px;flex:none;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}\n.order-list li img,.order-list li .ph0{width:42px;height:32px;flex:none;object-fit:cover;border:1px solid var(--line);border-radius:3px;background:var(--bg);display:inline-grid;place-items:center;font-size:16px}\n.order-list li .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.order-list li select{font-size:12px;max-width:112px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--ink)}\n.order-list li .kind{font-size:12px;color:var(--muted);min-width:56px;text-align:center}\n.order-list li.fixed{background:var(--bg)}\n.order-list li.fixed .grip{cursor:default}\n.order-list li.off{opacity:.6}\n.order-list li.sep{background:var(--bg);color:var(--muted);font-size:12px;padding:5px 10px}\n.order-list li.dragging{opacity:.4}\n.order-list li.drop-before{box-shadow:inset 0 3px 0 var(--cta)}\n.order-list li.drop-after{box-shadow:inset 0 -3px 0 var(--cta)}\n.memo-h{display:flex;align-items:flex-end;justify-content:space-between;gap:8px;margin-bottom:4px}\n.memo-h label.f{margin:0}\n.memo-h .note{font-weight:400;margin-left:4px}\n.btn.mic{flex:none;white-space:nowrap}\n.btn.mic.rec{background:#fee2e2;border-color:#ef4444;color:#b91c1c}\n.mic-live{font-size:12px;color:var(--muted);line-height:1.5}\n.mic-live:not(:empty){padding:4px 2px 0}\n.memo-foot{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin:6px 0 10px}\n.memo-foot .note{margin:0;font-size:12px;line-height:1.55}\n.memo-foot .btn{flex:none;white-space:nowrap}\n.bin li .ri.ok{color:var(--ok)}\n.bin li .ri.ng{color:var(--bad)}\n.ic{border:none;background:none;cursor:pointer;padding:2px 4px;color:var(--muted);font-size:13px;line-height:1}\n.ic:hover{color:var(--ink)}\n.ic.on{color:var(--cta);font-weight:700}\n.ic:disabled{opacity:.3;cursor:default}\n.tag{font-size:10px;padding:1px 6px;border-radius:8px;background:var(--accent-soft);color:var(--accent)}\n.tag.on{background:var(--cta);color:var(--cta-ink)}\nlabel.f{display:block;font-size:12px;color:var(--muted);margin:8px 0 3px}\n.in,textarea.in,select.in{width:100%;border:1px solid var(--line);border-radius:6px;padding:6px 8px;background:var(--panel)}\ntextarea.in{resize:vertical;min-height:60px}\n.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}\n.grid3{display:grid;grid-template-columns:1.25fr 1.1fr .75fr;gap:0 8px}\n.go{width:100%;padding:13px;font-size:16px;margin-top:10px}\n.chk{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted);margin-top:8px;cursor:pointer}\n.status{margin-top:10px;font-size:12px;border-radius:8px;padding:10px 12px;background:var(--accent-soft);display:none}\n.status.show{display:block}\n.status ol{margin:4px 0 0;padding-left:18px}\n.status li.done{color:var(--ok)}\n.status li.run{font-weight:700}\n.status li.err{color:var(--bad)}\n.status li.skip{color:var(--muted)}\ndetails.sec{border:1px solid var(--line);border-radius:8px;margin-bottom:8px;background:var(--panel)}\ndetails.sec>summary{cursor:pointer;padding:9px 12px;font-weight:700;font-size:13px;list-style:none;display:flex;justify-content:space-between;gap:8px}\ndetails.sec>summary::-webkit-details-marker{display:none}\ndetails.sec>summary::after{content:\"＋\";color:var(--muted)}\ndetails.sec[open]>summary::after{content:\"－\"}\ndetails.sec .body{padding:2px 12px 12px}\n.fld.unc .in{border-color:var(--warn);background:var(--warn-soft)}\n.fld .hint{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.45}\n.fld.unc .hint{color:var(--warn)}\n.chip{display:inline-block;font-size:10px;padding:1px 6px;border-radius:9px;margin-left:6px;vertical-align:1px;background:var(--accent-soft);color:var(--accent)}\n.chip.ai{background:var(--warn-soft);color:var(--warn)}\n.chip.web{background:var(--ok-soft);color:var(--ok)}\n.chip.doc{background:#e8eefc;color:#2a4a9b}\n.ex-row{display:grid;grid-template-columns:minmax(90px,34%) 1fr auto;gap:6px;align-items:center;margin-top:6px}\n.ex-row .hint{grid-column:1/-1}\n.bin li .dk{font-size:15px;line-height:1}\n.drop-more{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 4px}\n.drop-more .note{font-size:11px}\n.ver{font-size:10.5px;color:var(--muted);margin-left:6px;white-space:nowrap}\n.linkbox{display:flex;gap:6px;margin-top:8px}\n.linkbox input{flex:1;min-width:0;font-size:12px}\n#pasteBox .mbox{max-width:640px}\n#pasteBox .pg-body textarea{width:100%;min-height:220px}\n.legend{font-size:11px;color:var(--muted);margin:4px 0 10px}\n.note{font-size:12px;color:var(--muted)}\n.intern{font-size:12px;background:var(--accent-soft);border-radius:6px;padding:8px 10px;white-space:pre-wrap}\n.qcard{border:1px solid var(--warn);background:var(--warn-soft);border-radius:8px;padding:10px 12px;margin-bottom:10px}\n.qcard h3{margin:0 0 6px;font-size:13px}\n.q{border-top:1px dashed var(--line);padding:8px 0 4px}\n.q:first-of-type{border-top:none}\n.q p{margin:0 0 6px;font-size:13px}\n.q .opts{display:flex;flex-wrap:wrap;gap:6px}\n.q .row{display:flex;gap:6px;margin-top:6px}\n.q .row input{flex:1}\n.facts{font-size:12px}\n.facts table{width:100%;border-collapse:collapse;margin:4px 0 8px}\n.facts td,.facts th{border-bottom:1px solid var(--line);padding:3px 4px;text-align:left;vertical-align:top}\n.facts th{color:var(--muted);font-weight:500;white-space:nowrap;width:1%}\n.facts td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}\n.toolbar{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}\n.toolbar .note{flex:1;text-align:right}\n.banner{background:var(--warn-soft);color:var(--ink);border:1px solid var(--warn);border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:14px}\n.banner.bad{background:var(--bad-soft);border-color:var(--bad)}\n.pages{display:flex;flex-direction:column;align-items:center;gap:26px}\n.pg-wrap{position:relative}\n.pg-tag{position:absolute;left:-2px;top:-20px;font-size:11px;color:var(--muted)}\n.pg-scale{transform-origin:top left}\n.pg-box{box-shadow:0 2px 14px rgba(0,0,0,.18);background:#fff}\n.toggles{display:flex;flex-direction:column;gap:4px;font-size:13px}\n.toggles label{display:flex;gap:6px;align-items:center;cursor:pointer}\n.toggles select{font-size:12px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel)}\n.toast{position:fixed;right:20px;bottom:20px;background:var(--ink);color:var(--panel);padding:10px 14px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none;max-width:440px;z-index:40}\n.toast.show{opacity:1;transform:none}\n.busy{position:fixed;inset:0;background:var(--bg);z-index:30;display:none;place-items:center;text-align:center}\n.busy.show{display:grid}\n.busy b{display:block;font-size:18px;margin-bottom:6px}\n.busy span{color:var(--muted)}\n/* 計測モーダル */\n.modal{position:fixed;inset:0;background:rgba(10,14,20,.55);z-index:35;display:none;align-items:center;justify-content:center;padding:16px}\n.modal.show{display:flex}\n.pg-guide{max-width:620px;width:100%}\n.pg-guide .mtop{display:flex;align-items:center;justify-content:space-between;gap:10px}\n.pg-body{padding:6px 18px 18px;line-height:1.75;font-size:14px}\n.pg-body ul{margin:8px 0 10px;padding-left:20px}\n.pg-body li{margin:6px 0}\n.pcbadge{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:999px;background:#e8f0fb;color:#1f3a5f;font:700 11px/1.6 var(--f-body, sans-serif);letter-spacing:.04em;vertical-align:middle}\n#aiSet[hidden]{display:none!important}\n#aiSet .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}\n#aiKeyState{font-weight:700;font-size:12.5px;margin:2px 0 6px}\n#coDist[hidden],#coLinkBox[hidden]{display:none!important}\n#coDist{margin-top:14px;padding-top:12px;border-top:1px dashed var(--line)}\n.dist-h{font-size:13.5px;margin:0 0 2px}\n#printArea{display:none}\n@media print{\n  @page{size:A4 portrait;margin:0}\n  html,body{background:#fff!important;margin:0!important;padding:0!important}\n  body>*:not(#printArea){display:none!important}\n  #printArea{display:block!important}\n  #printArea .pp{width:210mm;height:296mm;overflow:hidden;break-after:page;page-break-after:always;break-inside:avoid}\n  #printArea .pp:last-child{break-after:auto;page-break-after:auto}\n  #printArea .pp img{width:100%;height:100%;object-fit:contain;display:block}\n}\n.mbox{background:var(--panel);border-radius:10px;width:min(1100px,100%);max-height:100%;display:flex;flex-direction:column;overflow:hidden}\n.mtop,.mbot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid var(--line);font-size:13px}\n.mbot{border-bottom:none;border-top:1px solid var(--line)}\n.mtop b{font-size:15px}\n.mtop input,.mbot input,.mtop select{width:80px;border:1px solid var(--line);border-radius:4px;padding:3px 6px;background:var(--panel)}\n.mtop select{width:auto;max-width:260px}\n.mcv{overflow:auto;flex:1;min-height:200px;background:#f4f4f4}\n.mcv canvas{display:block;cursor:crosshair}\n.mres{font-weight:700;font-size:15px;color:var(--cta)}\n@media (max-width:900px){.wrap{grid-template-columns:1fr}.side{position:static;max-height:none;border-right:none}}\n@media (prefers-reduced-motion:reduce){*{transition:none!important}}\n\n/* ===== 印刷シート（常に白い紙） ===== */\n.sheet{width:794px;height:1123px;background:#fff;color:#111;position:relative;overflow:hidden;font-family:\"Noto Sans JP\",sans-serif;--fs:11.2px;font-size:var(--fs)}\n.sheet.land{width:1123px;height:794px}\n.s1{padding:28px 34px 24px;display:flex;flex-direction:column;gap:7px}\n.catch{border:1.5px solid #1f3a5f;background:#eef4fb;padding:8px 12px 9px;line-height:1.55;position:relative}\n.catch::before{content:\"\";position:absolute;inset:2px;border:1px solid #c9d8ea;pointer-events:none}\n.catch .t{font-weight:900;color:#1f3a5f;font-size:calc(var(--fs) * 1.36);text-align:center}\n.catch .l{font-weight:500;font-size:calc(var(--fs) * 1.06);text-align:center}\n.pts{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;margin-top:7px;padding-top:7px;border-top:1px dashed #9db3cf;position:relative}\n.pt{display:flex;gap:6px;align-items:flex-start;line-height:1.45;font-size:calc(var(--fs) * .93)}\n.ptnote{font-size:calc(var(--fs) * .66);color:#445;text-align:right;margin-top:3px;line-height:1.25}\n.rs-web{margin:4px 0 8px;padding-left:18px}.rs-web li{margin:2px 0}\n.pt b{flex:none;background:#1f3a5f;color:#fff;font-size:calc(var(--fs) * .78);padding:1px 6px;border-radius:2px;margin-top:2px;letter-spacing:.04em;min-width:52px;text-align:center}\n.s-title{text-align:center;font-family:\"Noto Serif JP\",serif;font-weight:800;font-size:calc(var(--fs) * 1.8);letter-spacing:.5em;margin:0 0 -1px;padding-left:.5em}\ntable.gai{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;border:1.6px solid #111}\ntable.gai td{border:0;border-right:.8px solid #333;border-bottom:.8px solid #333;padding:2px 6px;vertical-align:middle;line-height:1.38;height:calc(var(--fs) * 1.8)}\ntable.gai td.cat{width:76px;text-align:center;font-weight:700;background:#1f3a5f;color:#fff;letter-spacing:.3em;padding-left:.3em;border-bottom-color:#6d84a3}\ntable.gai td.sub{width:92px;text-align:center;background:#f2f5f9;color:#222;font-weight:500;letter-spacing:.12em}\ntable.gai td.sub2{text-align:center;background:#f2f5f9;letter-spacing:.12em}\ntable.gai td.sub.exl{letter-spacing:0;font-size:.9em;line-height:1.25}\ntable.gai td.v{font-weight:500}\ntable.gai td.c{text-align:center;font-weight:500}\ntable.gai td.name{font-size:calc(var(--fs) * 1.45);font-weight:700;letter-spacing:.04em}\ntable.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:center;letter-spacing:.12em;color:#c2410c}\n.cn{display:inline-block;width:1.15em;text-align:left}\n.ar{display:flex;align-items:baseline;gap:4px;justify-content:center;font-variant-numeric:tabular-nums}\n.ar .k{font-weight:700;min-width:72px;text-align:right}\n.ar .t{color:#333}\n.tr-row{display:grid;grid-template-columns:1.25fr 1fr .55fr;gap:6px}\n.tr-row span:nth-child(3){text-align:right;font-weight:700}\n.rmk{display:flex;flex:1;min-height:56px;border:1.6px solid #111;border-top-width:0;margin-top:-7px}\n.rmk .cat{width:76px;flex:none;display:flex;align-items:center;justify-content:center;background:#1f3a5f;color:#fff;font-weight:700;letter-spacing:.3em;padding-left:.3em}\n.rmk .body{padding:7px 12px;line-height:1.65;white-space:pre-wrap;flex:1;font-weight:500}\n.foot{display:grid;grid-template-columns:1fr 1.15fr;border:1.6px solid #111;margin-top:4px}\n.foot .a{padding:7px 12px;border-right:1px solid #111;display:flex;flex-direction:column;justify-content:space-between;gap:3px}\n.foot .a .lic{font-size:calc(var(--fs) * .92)}\n.foot .a .assoc{font-size:calc(var(--fs) * .78);color:#333;white-space:pre-wrap;line-height:1.45}\n.foot .a .co{font-size:calc(var(--fs) * 1.55);font-weight:900;letter-spacing:.08em}\n.foot .a .co .br{font-size:.66em;margin-left:.6em;letter-spacing:.12em}\n.foot .a .lixil{display:inline-block;background:#e2580e;color:#fff;font-size:calc(var(--fs) * .72);font-weight:700;padding:1px 6px;letter-spacing:.06em;align-self:flex-start}\n.foot .b{padding:6px 10px 6px 12px;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}\n.foot .b .tel{color:#c2410c;font-weight:900;font-size:calc(var(--fs) * 1.6);letter-spacing:.06em;line-height:1.2}\n.foot .b .ln{font-size:calc(var(--fs) * .88);line-height:1.5}\n.foot .b .qr{text-align:center;font-size:calc(var(--fs) * .72)}\n.foot .b .qr img{width:66px;height:66px;display:block;image-rendering:pixelated}\n.hl .unc{background:#fff0c2;box-shadow:inset 0 -2px 0 #e0a52b}\n.sheet.photo{background:#111}\n.sheet .bgimg{position:absolute;inset:0;background-size:cover;background-position:center}\n.sheet.mapp,.sheet.ph{display:flex;flex-direction:column;padding:26px 30px 22px}\n.mhead{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;border-bottom:2px solid #1f3a5f;padding-bottom:5px;margin-bottom:12px}\n.mhead b{font-size:20px;color:#1f3a5f;letter-spacing:.2em;white-space:nowrap}\n.mhead span{font-size:11px;color:#555;text-align:right}\n.mbody{flex:1;display:flex;align-items:center;justify-content:center;min-height:0}\n.mbody img{max-width:100%;max-height:100%;display:block}\n.mfoot{font-size:10px;color:#666;text-align:right;margin-top:8px}\n.phbox{flex:1;display:grid;gap:8px;min-height:0}\n.phc{position:relative;background-size:cover;background-position:center;background-color:#e9ecef;min-height:0}\n.phc span{position:absolute;left:0;bottom:0;background:rgba(17,24,39,.74);color:#fff;font-size:11px;padding:3px 9px;letter-spacing:.04em;max-width:100%}\n.phbox.L5{grid-template-columns:1fr 1fr;grid-template-rows:1.6fr 1fr 1fr}\n.phbox.L5 .c0{grid-column:1/3}\n.phbox.P5{grid-template-columns:1.2fr 1fr;grid-template-rows:1fr 1fr .95fr}\n.phbox.P5 .c0{grid-row:1/3}\n.phbox.L4{grid-template-columns:1fr 1fr 1fr;grid-template-rows:1.7fr 1fr}\n.phbox.L4 .c0{grid-column:1/4}\n.phbox.P4{grid-template-columns:1.25fr 1fr;grid-template-rows:1fr 1fr 1fr}\n.phbox.P4 .c0{grid-row:1/4}\n.phbox.L3,.phbox.P3{grid-template-columns:1fr 1fr;grid-template-rows:1.6fr 1fr}\n.phbox.L3 .c0,.phbox.P3 .c0{grid-column:1/3}\n.phbox.L2,.phbox.P2{grid-template-columns:1fr;grid-template-rows:1.4fr 1fr}\n.phbox.L1,.phbox.P1{grid-template-columns:1fr;grid-template-rows:1fr}\n.phbox.G6{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr 1fr}\n\u003c/style>\n\u003c/head>\n\u003cbody>\n\u003cheader class=\"top\">\n  \u003cdiv class=\"brand\">\u003cb>物件資料メーカー\u003c/b>\u003cspan>株式会社大央ハウジング｜登記簿・物件レポート・地図・写真から物件概要書を自動作成\u003c/span>\u003c/div>\n  \u003cspan class=\"aichip\" id=\"aiChip\" role=\"status\">AI：確認中…\u003c/span>\n  \u003cdiv class=\"sp\">\u003c/div>\n  \u003cbutton class=\"btn ghost\" id=\"btnNew\" type=\"button\">新しい物件を作る\u003c/button>\n  \u003cbutton class=\"btn ghost\" id=\"btnPdf\" type=\"button\">PDFで書き出す\u003c/button>\n  \u003cbutton class=\"btn primary\" id=\"btnPrint\" type=\"button\">🖨 印刷する\u003c/button>\n\u003c/header>\n\u003cdiv class=\"wrap\">\n  \u003caside class=\"side\">\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">1\u003c/span>資料をまとめてドロップ\u003c/h2>\n      \u003cdiv class=\"drop\" id=\"drop\" tabindex=\"0\" role=\"button\" aria-label=\"ファイルを選択\">\n        \u003cstrong>登記簿・物件レポート・公図・地図・写真・その他の資料\u003c/strong>\n        \u003csmall>PDF・画像・Word・Excel・CSV・テキストを何件でも一度に。他社の販売図面やポータルの物件ページも読み取ります\u003c/small>\n        \u003cinput type=\"file\" id=\"file\" multiple accept=\".pdf,application/pdf,image/*,.docx,.docm,.xlsx,.xlsm,.pptx,.csv,.tsv,.txt,.md,.html,.htm,.eml,.json\" hidden>\n      \u003c/div>\n      \u003cdiv class=\"drop-more\">\u003cbutton class=\"btn sm\" id=\"btnPasteText\" type=\"button\">文章を貼り付けて読み込む\u003c/button>\u003cspan class=\"note\">画面写し（スクリーンショット）や文章は Ctrl+V（Macは⌘+V）でも入れられます\u003c/span>\u003c/div>\n      \u003cdiv id=\"bins\">\u003c/div>\n    \u003c/section>\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">2\u003c/span>備考メモ（話すだけでOK）と自動作成\u003c/h2>\n      \u003cdiv class=\"memo-h\">\n        \u003clabel class=\"f\" for=\"memo\">備考メモ \u003cspan class=\"note\">（思いついた順でOK）\u003c/span>\u003c/label>\n        \u003cbutton class=\"btn sm mic\" id=\"btnMic\" type=\"button\" hidden aria-pressed=\"false\">🎤 話して入力\u003c/button>\n      \u003c/div>\n      \u003ctextarea class=\"in\" id=\"memo\" rows=\"5\" placeholder=\"例）えーと、この物件は借地権で、地代は年間30万円かかります。あと雨漏りの箇所がいくつかあって、旧耐震の建物です。現況は賃貸中で、引渡しはご相談で。\">\u003c/textarea>\n      \u003cdiv class=\"mic-live\" id=\"micLive\" aria-live=\"polite\">\u003c/div>\n      \u003cdiv class=\"memo-foot\">\n        \u003cp class=\"note\">「物件資料を自動作成」を押すと、AIが備考欄に箇条書きで整理します。借地権・現況などは概要の欄にも反映します。\u003cspan id=\"micKbd\" hidden>スマホ・タブレットでは、キーボードのマイク（音声入力）で話して入力できます。\u003c/span>\u003c/p>\n        \u003cbutton class=\"btn sm\" id=\"btnTidy\" type=\"button\">備考だけ整理する\u003c/button>\n      \u003c/div>\n      \u003clabel class=\"f\" for=\"memoPrice\">売出価格（空欄ならレポートの想定価格）\u003c/label>\u003cinput class=\"in\" id=\"memoPrice\" placeholder=\"例）7億5,000万円\">\n      \u003cdiv class=\"grid2\">\n        \u003cdiv>\u003clabel class=\"f\" for=\"memoOffice\">帯（店舗）\u003c/label>\u003cselect class=\"in\" id=\"memoOffice\">\u003c/select>\u003c/div>\n        \u003cdiv>\u003clabel class=\"f\" for=\"memoTanto\">担当者 \u003cspan class=\"note\">（手入力できます）\u003c/span>\u003c/label>\u003cinput class=\"in\" id=\"memoTanto\" list=\"tantoList\" autocomplete=\"off\" placeholder=\"例）山田太郎 090-1234-5678\">\u003cdatalist id=\"tantoList\">\u003c/datalist>\u003c/div>\n      \u003c/div>\n      \u003clabel class=\"chk\">\u003cinput type=\"checkbox\" id=\"hiAcc\" checked> 高精度モード（時間はかかりますが、より慎重に読み取ります）\u003c/label>\n      \u003clabel class=\"chk\">\u003cinput type=\"checkbox\" id=\"webOn\" checked> 周辺環境とネットの情報を調べて、アピールポイントに使う \u003cspan class=\"note\" id=\"webOnNote\">（周辺の施設・徒歩の道のり・標高を地図で調べます。無料）\u003c/span>\u003c/label>\n      \u003cbutton class=\"btn primary go\" id=\"btnGen\" type=\"button\">物件資料を自動作成\u003c/button>\n      \u003cdiv class=\"status\" id=\"status\" aria-live=\"polite\">\u003c/div>\n      \u003cdetails class=\"sec\" style=\"margin-top:12px\" id=\"webSec\">\n        \u003csummary>ネットの情報で裏付ける（任意）\u003c/summary>\n        \u003cdiv class=\"body\">\n          \u003cp class=\"note\" id=\"webNote\" style=\"margin:6px 0 8px\">この表示のAIはインターネットを直接検索できません。ネットで裏付けたいときは、指示文をコピーして Claude に貼り付け、返ってきた回答をここへ貼り付けてください。キャッチコピー・アピールポイント・交通・学校区に反映します。\u003c/p>\n          \u003cdiv style=\"display:flex;gap:8px;flex-wrap:wrap;align-items:center\">\u003cbutton class=\"btn sm\" id=\"btnCopyPrompt\" type=\"button\">調査の指示文をコピー\u003c/button>\u003ca href=\"https://claude.ai/new\" target=\"_blank\" rel=\"noopener\" class=\"note\">Claude を開く ↗\u003c/a>\u003c/div>\n          \u003ctextarea class=\"in\" id=\"promptBox\" rows=\"4\" style=\"margin-top:8px;display:none\" readonly>\u003c/textarea>\n          \u003ctextarea class=\"in\" id=\"webPaste\" rows=\"4\" style=\"margin-top:8px\" placeholder=\"Claude の回答をここに貼り付け\">\u003c/textarea>\n          \u003cbutton class=\"btn sm\" id=\"btnImport\" type=\"button\" style=\"margin-top:6px\">回答を取り込む\u003c/button>\n        \u003c/div>\n      \u003c/details>\n      \u003cdetails class=\"sec\" id=\"aiSet\" hidden>\n        \u003csummary>AIの設定（パソコン版）\u003c/summary>\n        \u003cdiv class=\"body\">\n          \u003cp class=\"note\" style=\"margin:6px 0 8px\">AI（物件レポート・公図・地図・その他の資料の読み取り、資料の判別、写真選び、アピールポイントの作成など）を使うには、Anthropic社のAPIキーが必要です。利用料は使った分だけで、標準の高性能モデル（Claude Opus 5.5）では物件資料1件あたり約50円が目安です。キーはこのパソコンのブラウザの中にだけ保存され、AIに読み取りを頼むときだけAnthropic社へ送られます。共用のパソコンでは、使い終わったら「キーを消す」を押してください。\u003c/p>\n          \u003cdiv id=\"aiKeyState\">APIキー：未設定\u003c/div>\n          \u003clabel class=\"f\" for=\"aiKey\">APIキー\u003c/label>\u003cinput class=\"in\" id=\"aiKey\" type=\"password\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"sk-ant-…\">\n          \u003clabel class=\"f\" for=\"aiModel\">AIのモデル\u003c/label>\n          \u003cselect class=\"in\" id=\"aiModel\">\n            \u003coption value=\"\">おすすめ：Claude Opus 5.5（高性能・1件あたり約50円）\u003c/option>\n            \u003coption value=\"claude-sonnet-5-5\">Claude Sonnet 5.5（標準・約半額）\u003c/option>\n            \u003coption value=\"claude-haiku-5-5\">Claude Haiku 5.5（速い・とても安い・精度は下がる）\u003c/option>\n          \u003c/select>\n          \u003cdiv class=\"row\">\u003cbutton class=\"btn sm primary\" id=\"aiSave\" type=\"button\">保存してAIを使う\u003c/button>\u003cbutton class=\"btn sm\" id=\"aiClear\" type=\"button\">キーを消す\u003c/button>\u003c/div>\n          \u003cp class=\"note\" style=\"margin-top:8px\">APIキーは Anthropic のコンソール（platform.claude.com）で発行できます。\u003c/p>\n          \u003cdiv id=\"coDist\" hidden>\n            \u003ch3 class=\"dist-h\">社員に配るリンク・ファイル（AI付き）\u003c/h3>\n            \u003cp class=\"note\" style=\"margin:4px 0 8px\">\u003cb>社員用リンク\u003c/b>：開くだけで、claude.ai のアカウントもAPIキーの入力もなしにAIまで使えるWeb版のリンクです（スマホでも使えます）。\u003cb>社員用ファイル\u003c/b>：同じことができる「物件資料メーカー_社内用.html」です（店舗・担当者の一覧も入ります）。\u003cb>どちらも社外の人には渡さないでください\u003c/b>。リンクやファイルの中のキーは読みにくくしてありますが、完全には隠せません。漏れたときは、Anthropicのコンソールでキーを無効にして作り直してください。\u003c/p>\n            \u003clabel class=\"f\" for=\"coKey\">社員用のAPIキー \u003cspan class=\"note\">（空欄ならこのパソコンのキー。社員用に別のキーを発行するのがおすすめ）\u003c/span>\u003c/label>\n            \u003cinput class=\"in\" id=\"coKey\" type=\"password\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"空欄ならこのパソコンのキーを使います\">\n            \u003cdiv class=\"row\">\u003cbutton class=\"btn sm primary\" id=\"coLink\" type=\"button\">社員用のリンクを作る\u003c/button>\u003cbutton class=\"btn sm\" id=\"coMake\" type=\"button\">社員用のファイルを作る\u003c/button>\u003c/div>\n            \u003cdiv class=\"linkbox\" id=\"coLinkBox\" hidden>\u003cinput class=\"in\" id=\"coLinkOut\" readonly aria-label=\"社員用リンク\">\u003cbutton class=\"btn sm\" id=\"coLinkCopy\" type=\"button\">コピー\u003c/button>\u003c/div>\n          \u003c/div>\n        \u003c/div>\n      \u003c/details>\n    \u003c/section>\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">3\u003c/span>内容の確認・修正\u003c/h2>\n      \u003cdiv class=\"legend\">黄色の項目は推定です。確認した値に書き換えるとすぐプレビューに反映され、黄色が消えます。\u003c/div>\n      \u003cdiv id=\"qbox\">\u003c/div>\n      \u003cdiv id=\"form\">\u003c/div>\n    \u003c/section>\n  \u003c/aside>\n  \u003cmain class=\"stage\">\n    \u003cdiv class=\"toolbar\">\n      \u003cdiv class=\"toggles\">\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgPts\" checked> アピールポイントを載せる\u003c/label>\n        \u003clabel>写真ページ \u003cselect id=\"tgPhoto\">\u003coption value=\"5\">5枚レイアウト\u003c/option>\u003coption value=\"1\">外観1枚（全面）\u003c/option>\u003coption value=\"0\">入れない\u003c/option>\u003c/select>\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgCap\" checked> 写真に説明を入れる\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgMapHead\" checked> 地図ページに見出しを付ける\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgEnhance\" checked> 写真を明るく補正する\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgHl\" checked> 要確認の項目をプレビューで強調（PDFには出ません）\u003c/label>\n      \u003c/div>\n      \u003cdiv class=\"note\" id=\"pageCount\">\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"banner\" id=\"sampleBanner\">いま表示しているのは見本（前島三丁目一棟ビル）です。「新しい物件を作る」を押してから資料を入れてください。\u003c/div>\n    \u003cdiv class=\"banner bad\" id=\"aiBanner\" style=\"display:none\">\u003c/div>\n    \u003cdiv class=\"banner bad\" id=\"errBanner\" style=\"display:none\" role=\"alert\">\u003c/div>\n    \u003cdetails class=\"order\" id=\"orderBox\" open>\n      \u003csummary>\u003cb>資料の順番（PDFの並び）\u003c/b>\u003cspan class=\"note\" id=\"orderMode\">\u003c/span>\u003c/summary>\n      \u003cdiv class=\"order-body\">\n        \u003cp class=\"note\">行をドラッグするか ▲▼ で入れ替えられます。✕ で外した資料はPDFに入りません（「戻す」で元に戻せます）。資料の種類もここで直せます。\u003c/p>\n        \u003col class=\"order-list\" id=\"orderList\">\u003c/ol>\n        \u003cbutton class=\"btn sm\" id=\"orderReset\" type=\"button\">標準の順番に戻す\u003c/button>\n      \u003c/div>\n    \u003c/details>\n    \u003cdiv class=\"pages\" id=\"pages\">\u003c/div>\n  \u003c/main>\n\u003c/div>\n\u003cdiv class=\"modal\" id=\"printGuide\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"pgTitle\">\n  \u003cdiv class=\"mbox pg-guide\">\n    \u003cdiv class=\"mtop\">\u003cb id=\"pgTitle\">印刷用のPDFを用意しました\u003c/b>\u003cspan class=\"sp\">\u003c/span>\u003cbutton class=\"btn sm\" id=\"pgClose\" type=\"button\">閉じる\u003c/button>\u003c/div>\n    \u003cdiv class=\"pg-body\" id=\"pgBody\">\n      \u003cp>保存したPDFを開いて、プリンター（コピー機）を選んで印刷してください。\u003c/p>\n      \u003cul>\n        \u003cli>\u003cb>パソコン：\u003c/b>ダウンロードしたPDFを開き、\u003cb>Ctrl＋P\u003c/b>（Macは\u003cb>⌘＋P\u003c/b>）→ プリンターでコピー機を選んで「印刷」。用紙は\u003cb>A4\u003c/b>、倍率は\u003cb>「実際のサイズ」または「用紙に合わせる」\u003c/b>にしてください。\u003c/li>\n        \u003cli>\u003cb>iPhone・iPad：\u003c/b>表示された共有メニューの\u003cb>「プリント」\u003c/b>から、コピー機を選んで印刷できます（コピー機がAirPrintに対応している場合）。\u003c/li>\n      \u003c/ul>\n      \u003cp class=\"note\">このアプリはclaude.aiの安全な枠の中で動いているため、ページから直接プリンターの画面を開くことができません。そのため、印刷用のPDFを保存してから印刷する流れになっています。\u003c/p>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv class=\"modal\" id=\"measure\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"msTitle\">\n  \u003cdiv class=\"mbox\">\n    \u003cdiv class=\"mtop\">\n      \u003cb id=\"msTitle\">図面で測る\u003c/b>\n      \u003cselect id=\"msMap\" aria-label=\"図面\">\u003c/select>\n      \u003cspan id=\"msScaleWrap\">縮尺 1/\u003cinput id=\"msDen\" type=\"number\" min=\"50\" step=\"50\" value=\"500\" aria-label=\"縮尺の分母\">\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msZoomOut\" type=\"button\" aria-label=\"縮小\">－\u003c/button>\n      \u003cbutton class=\"btn sm\" id=\"msZoomIn\" type=\"button\" aria-label=\"拡大\">＋\u003c/button>\n      \u003cspan class=\"note\" id=\"msInfo\">\u003c/span>\n      \u003cspan style=\"flex:1\">\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msClose\" type=\"button\">閉じる\u003c/button>\n    \u003c/div>\n    \u003cdiv class=\"mcv\" id=\"msWrap\">\u003ccanvas id=\"msCanvas\">\u003c/canvas>\u003c/div>\n    \u003cdiv class=\"mbot\">\n      \u003cspan class=\"note\">2点をクリックすると距離を測ります。\u003c/span>\n      \u003cspan class=\"mres\" id=\"msRes\">—\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msToFront\" type=\"button\" disabled>間口に入れる\u003c/button>\n      \u003cbutton class=\"btn sm\" id=\"msToRoad\" type=\"button\" disabled>道路幅員に入れる\u003c/button>\n      \u003cspan class=\"note\">｜縮尺が分からない図面は、縮尺バーなど長さの分かる2点を測って\u003c/span>\n      \u003cinput id=\"msLen\" type=\"number\" step=\"0.1\" placeholder=\"長さm\" aria-label=\"既知の長さ（メートル）\">\n      \u003cbutton class=\"btn sm\" id=\"msCalib\" type=\"button\" disabled>で校正\u003c/button>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv id=\"offscreen\" style=\"position:fixed;left:0;top:0;z-index:-10;pointer-events:none\" aria-hidden=\"true\">\u003c/div>\n\u003cdiv class=\"busy\" id=\"busy\">\u003cdiv>\u003cb>PDFを作成しています\u003c/b>\u003cspan>ページ数が多いと数十秒かかります\u003c/span>\u003c/div>\u003c/div>\n\u003cdiv class=\"modal\" id=\"pasteBox\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"pbTitle\">\n  \u003cdiv class=\"mbox pg-guide\">\n    \u003cdiv class=\"mtop\">\u003cb id=\"pbTitle\">文章を貼り付けて読み込む\u003c/b>\u003cspan class=\"sp\">\u003c/span>\u003cbutton class=\"btn sm\" id=\"pbClose\" type=\"button\">閉じる\u003c/button>\u003c/div>\n    \u003cdiv class=\"pg-body\">\n      \u003cp class=\"note\" style=\"margin:0 0 8px\">グーホーム・うちなーらいふなどの物件ページや、他社から届いたメール・資料の文章を貼り付けてください。ページを開いて Ctrl+A（すべて選ぶ）→ Ctrl+C（コピー）→ ここに Ctrl+V で入ります。写真は画面写しで入れてください。\u003c/p>\n      \u003clabel class=\"f\" for=\"pbName\">資料の名前（任意）\u003c/label>\u003cinput class=\"in\" id=\"pbName\" placeholder=\"例）グーホームの物件ページ\">\n      \u003clabel class=\"f\" for=\"pbText\">文章\u003c/label>\u003ctextarea class=\"in\" id=\"pbText\" placeholder=\"ここに貼り付け\">\u003c/textarea>\n      \u003cdiv style=\"display:flex;gap:8px;margin-top:10px\">\u003cbutton class=\"btn primary\" id=\"pbOk\" type=\"button\">読み込む\u003c/button>\u003c/div>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv class=\"toast\" id=\"toast\" role=\"status\">\u003c/div>\n\u003cdiv id=\"printArea\" aria-hidden=\"true\">\u003c/div>\n@@APP_SCRIPTS@@\n\u003c/body>\n\u003c/html>\n";</script>
 <script type="text/plain" id="pdfWorkerSrc" data-app="worker">/**
  * @licstart The following is the entire license notice for the
  * JavaScript code in this page
@@ -3902,10 +3949,170 @@ window.__CMAPS={"RKSJ-V":"A+BSQ29weXJpZ2h0IDE5OTAtMjAwOSBBZG9iZSBTeXN0ZW1zIEluY2
 })();
 
 </script>
+<script data-app="near.js">/* near.js */
+/* 周辺環境を調べる（無料の地図サービス。APIキー不要）
+   ・住所 → 位置：国土地理院の住所検索（見つからなければ OpenStreetMap の Nominatim）
+   ・周辺の施設：OpenStreetMap（Overpass API）
+   ・徒歩の道のり：OpenStreetMap の徒歩ルート（routing.openstreetmap.de。1秒に1回まで）
+   ・標高：国土地理院の標高API
+   徒歩分数は、不動産広告の規約どおり「道路距離80mにつき1分（端数は切り上げ）」で出す。 */
+(function () {
+  "use strict";
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const fail = (code, msg) => Object.assign(new Error(msg || code), { code });
+  async function getJSON(url, opts = {}, ms = 20000) {
+    const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), ms);
+    try {
+      const r = await fetch(url, { ...opts, signal: ctl.signal });
+      if (!r.ok) throw fail("http", `HTTP ${r.status}`);
+      return await r.json();
+    } catch (e) { throw e?.name === "AbortError" ? fail("timeout") : e; } finally { clearTimeout(tm); }
+  }
+  const KAN = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+  const z2h = s => String(s ?? "").replace(/[０-９Ａ-Ｚａ-ｚ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/[－‐―ー−]/g, "-").replace(/\s+/g, "")
+    .replace(/([一二三四五六七八九十]+)丁目/g, (m, k) => (k.length === 1 ? KAN[k] : k === "十" ? 10 : k[0] === "十" ? 10 + KAN[k[1]] : KAN[k[0]] * 10 + (KAN[k[2]] || 0)) + "丁目");
+  const dist = (a, b) => {
+    const R = 6371000, t = x => x * Math.PI / 180, dLat = t(b.lat - a.lat), dLng = t(b.lng - a.lng);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(t(a.lat)) * Math.cos(t(b.lat)) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  };
+  const walkMin = m => Math.max(1, Math.ceil(m / 80));
+
+  /* ---------- 住所 → 位置 ---------- */
+  async function geocode(queries) {
+    let rough = null;
+    for (const q0 of queries.filter(Boolean)) {
+      const q = String(q0).replace(/\s+/g, "");
+      try {
+        const a = await getJSON("https://msearch.gsi.go.jp/address-search/AddressSearch?q=" + encodeURIComponent(q), {}, 12000);
+        if (Array.isArray(a) && a.length) {
+          // 入れた住所と頭から一番長く一致する候補を選ぶ
+          const nq = z2h(q); let best = null, bs = -1;
+          for (const f of a.slice(0, 30)) {
+            const t = z2h(f?.properties?.title || ""); let n = 0; while (n < t.length && t[n] === nq[n]) n++;
+            if (n > bs) { bs = n; best = f; }
+          }
+          const [lng, lat] = best.geometry.coordinates, title = best.properties?.title || q;
+          const hit = { lat: +lat, lng: +lng, label: title, by: "国土地理院", q, precise: /\d+(番|号|-\d)|丁目\d/.test(z2h(title)) };
+          if (hit.precise) return hit;
+          rough = rough || hit; continue; // 丁目・字までしか分からないときは、次の書き方も試す
+        }
+      } catch { /* 次の方法へ */ }
+      try {
+        const a = await getJSON("https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=jp&accept-language=ja&q=" + encodeURIComponent(q), {}, 12000);
+        if (Array.isArray(a) && a.length) { const hit = { lat: +a[0].lat, lng: +a[0].lon, label: a[0].display_name, by: "OpenStreetMap", q, precise: /house|building|residential/.test(a[0].type || "") }; if (hit.precise) return hit; rough = rough || hit; }
+      } catch { /* 次の住所へ */ }
+    }
+    return rough;
+  }
+
+  /* ---------- 標高（国土地理院） ---------- */
+  async function elevation(pt) {
+    try {
+      const j = await getJSON(`https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php?lon=${pt.lng}&lat=${pt.lat}&outtype=JSON`, {}, 10000);
+      const v = Number(j?.elevation); return isFinite(v) ? Math.round(v * 10) / 10 : null;
+    } catch { return null; }
+  }
+
+  /* ---------- 周辺の施設（OpenStreetMap） ---------- */
+  const CATS = [
+    { cat: "駅", r: 2500, q: '["railway"~"^(station|halt)$"]' },
+    { cat: "バス停", r: 600, q: '["highway"="bus_stop"]' },
+    { cat: "スーパー", r: 1500, q: '["shop"="supermarket"]' },
+    { cat: "コンビニ", r: 1000, q: '["shop"="convenience"]' },
+    { cat: "ドラッグストア", r: 1500, q: '["shop"~"^(chemist|drugstore)$"]' },
+    { cat: "商業施設", r: 3000, q: '["shop"~"^(mall|department_store)$"]' },
+    { cat: "病院", r: 3000, q: '["amenity"="hospital"]' },
+    { cat: "クリニック", r: 1000, q: '["amenity"~"^(clinic|doctors|dentist)$"]' },
+    { cat: "学校", r: 2500, q: '["amenity"="school"]' },
+    { cat: "幼稚園・保育園", r: 1200, q: '["amenity"~"^(kindergarten|childcare)$"]' },
+    { cat: "公園", r: 1200, q: '["leisure"="park"]' },
+    { cat: "銀行", r: 1500, q: '["amenity"="bank"]' },
+    { cat: "郵便局", r: 1500, q: '["amenity"="post_office"]' },
+    { cat: "役所", r: 3000, q: '["amenity"="townhall"]' },
+    { cat: "図書館", r: 2500, q: '["amenity"="library"]' },
+    { cat: "ビーチ", r: 5000, q: '["natural"="beach"]' },
+    { cat: "空港", r: 15000, q: '["aeroway"="aerodrome"]["iata"]' },
+    { cat: "港・ターミナル", r: 3000, q: '["amenity"="ferry_terminal"]' }
+  ];
+  function catOf(tags) {
+    const n = tags.name || "";
+    if (/^(station|halt)$/.test(tags.railway || "")) return "駅";
+    if (tags.highway === "bus_stop") return "バス停";
+    if (tags.shop === "supermarket") return "スーパー";
+    if (tags.shop === "convenience") return "コンビニ";
+    if (/^(chemist|drugstore)$/.test(tags.shop || "")) return "ドラッグストア";
+    if (/^(mall|department_store)$/.test(tags.shop || "")) return "商業施設";
+    if (tags.amenity === "hospital") return "病院";
+    if (/^(clinic|doctors|dentist)$/.test(tags.amenity || "")) return "クリニック";
+    if (tags.amenity === "school") return /中学校/.test(n) && /小学校|小中学校/.test(n) ? "小中学校" : /中学校/.test(n) ? "中学校" : /小学校/.test(n) ? "小学校" : /高等学校|高校/.test(n) ? "高校" : /大学/.test(n) ? "大学" : /特別支援|養護/.test(n) ? "" : "学校";
+    if (/^(kindergarten|childcare)$/.test(tags.amenity || "")) return "幼稚園・保育園";
+    if (tags.leisure === "park") return "公園";
+    if (tags.amenity === "bank") return "銀行";
+    if (tags.amenity === "post_office") return "郵便局";
+    if (tags.amenity === "townhall") return "役所";
+    if (tags.amenity === "library") return "図書館";
+    if (tags.natural === "beach") return "ビーチ";
+    if (tags.aeroway === "aerodrome") return "空港";
+    if (tags.amenity === "ferry_terminal") return "港・ターミナル";
+    return "";
+  }
+  const OVERPASS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
+  async function facilities(pt) {
+    const parts = CATS.map(c => `nwr(around:${c.r},${pt.lat},${pt.lng})${c.q}[name];`).join("\n");
+    const ql = `[out:json][timeout:25];\n(\n${parts}\n);\nout tags center 900;`;
+    let data = null, lastErr = null;
+    for (const ep of OVERPASS) {
+      try { data = await getJSON(ep, { method: "POST", body: new URLSearchParams({ data: ql }) }, 35000); break; } catch (e) { lastErr = e; }
+    }
+    if (!data) throw lastErr || fail("overpass");
+    const out = [];
+    for (const el of data.elements || []) {
+      const tags = el.tags || {}, name = tags["name:ja"] || tags.name || ""; if (!name) continue;
+      const lat = el.lat ?? el.center?.lat, lng = el.lon ?? el.center?.lon; if (lat == null || lng == null) continue;
+      const cat = catOf(tags); if (!cat) continue;
+      out.push({ cat, name, lat, lng, straight: Math.round(dist(pt, { lat, lng })), op: String(tags.operator || tags.network || "").slice(0, 40), brand: String(tags["brand:ja"] || tags.brand || "").slice(0, 30) });
+    }
+    // 同じ名前は近い方だけ（バス停は上り・下りで2つあることが多い）
+    const seen = new Map();
+    for (const f of out.sort((a, b) => a.straight - b.straight)) { const k = f.cat + "|" + f.name.replace(/\s/g, ""); if (!seen.has(k)) seen.set(k, f); }
+    return [...seen.values()];
+  }
+
+  /* ---------- 徒歩の道のり（主な施設だけ。まとめて1回で、だめなら1件ずつ） ---------- */
+  const FOOT = "https://routing.openstreetmap.de/routed-foot";
+  async function walkRoutes(pt, list) {
+    const dests = list.filter(f => f.straight <= 6000).slice(0, 60);
+    if (!dests.length) return { ok: 0, by: "" };
+    try {
+      const coords = [[pt.lng, pt.lat], ...dests.map(f => [f.lng, f.lat])].map(([x, y]) => `${(+x).toFixed(6)},${(+y).toFixed(6)}`).join(";");
+      const j = await getJSON(`${FOOT}/table/v1/driving/${coords}?sources=0&annotations=distance`, {}, 25000);
+      const row = j?.distances?.[0];
+      if (j?.code === "Ok" && Array.isArray(row)) {
+        let ok = 0;
+        dests.forEach((f, i) => { const m = row[i + 1]; if (isFinite(m) && m > 0 && m < f.straight * 4 + 500) { f.road = Math.round(m); f.walk = walkMin(m); ok++; } });
+        if (ok) return { ok, by: "table" };
+      }
+    } catch { /* 1件ずつに切り替え */ }
+    let ok = 0;
+    for (const f of dests.slice(0, 10)) {
+      try {
+        const j = await getJSON(`${FOOT}/route/v1/driving/${pt.lng},${pt.lat};${f.lng},${f.lat}?overview=false&alternatives=false&steps=false`, {}, 12000), m = j?.routes?.[0]?.distance;
+        if (isFinite(m) && m > 0) { f.road = Math.round(m); f.walk = walkMin(m); ok++; }
+      } catch { /* 道のりが出せないときは直線距離だけ */ }
+      await sleep(1100); // 1秒に1回まで
+    }
+    return { ok, by: "route" };
+  }
+
+  window.Near = { geocode, elevation, facilities, walkRoutes, dist, walkMin, CATS: CATS.map(c => c.cat) };
+})();
+
+</script>
 <script data-app="app.js">/* app.js */
 /* 大央ハウジング 物件資料メーカー */
 "use strict";
-const APP_VERSION = "2026.11.26-3";
+const APP_VERSION = "2026.11.27-1";
 const WEB_URL = "https://md19880822-afk.github.io/daio-bukken/"; // Web版（リンクで使う版）の置き場
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -4021,7 +4228,7 @@ const EMPTY = () => ({
 });
 const S = {
   d: EMPTY(), unc: new Set(), src: {}, notes: {}, questions: [],
-  facts: null, site: null, sources: [], internal: "",
+  facts: null, site: null, sources: [], internal: "", research: null,
   co: loadCo(), reg: [], report: null, maps: [], photos: [], docs: [], docRank: {},
   sample: false, busy: false
 };
@@ -4049,6 +4256,11 @@ function renderAiChip() {
   else if (AI.state === "none" && STANDALONE) { b.style.display = ""; b.textContent = (HOSTED ? "AI（物件レポート・資料の読み取り、資料の判別、写真選び、アピールポイント作成など）を使うには、管理者から配られた「社員用リンク」を開いてください。管理者の方は、手順2の下の「AIの設定」にAPIキーを入れると使え、社員用リンクも作れます。" : "パソコン版でAI（物件レポート・資料の読み取り、資料の判別、写真選び、アピールポイント作成など）を使うには、手順2の下の「AIの設定」にAPIキーを入れてください。") + noAi; }
   else if (AI.state === "none") { b.style.display = ""; b.textContent = "この表示ではAIを使えません。登記簿・用途地域図と、文字のある資料の機械読み取りだけで作成します。claude.ai にログインして開くと、AIの機能も使えます。"; }
   else b.style.display = "none";
+  // ネット検索ができるのは、AIの設定があるパソコン版・Web版
+  const web = AI.fn && AI.lim?.web, wn = $("#webNote"), on = $("#webOnNote");
+  if (wn && web) wn.textContent = "自動作成のときに、AIがネット検索で地域の特徴・開発・学校区を出典つきで調べます（ここでの手作業は不要です）。Claude のチャットで調べた結果を足したいときだけ使ってください。";
+  if (!STANDALONE && $("#webOn")) { $("#webOn").checked = false; $("#webOn").disabled = true; }
+  if (on) on.textContent = !STANDALONE ? "（Web版・パソコン版で使えます。claude.ai版からは外部の地図サービスに接続できません）" : web ? "（地図で周辺の施設・徒歩の道のり・標高を調べ〔無料〕、AIがネット検索で地域の情報・学校区を調べます〔1件あたり約25円〕）" : "（周辺の施設・徒歩の道のり・標高を地図で調べます。無料）";
 }
 const ERR = {
   not_granted: "AIの利用が許可されていません（確認画面で「許可」を選ぶと使えます）",
@@ -4065,7 +4277,8 @@ const ERR = {
   no_credit: "APIの利用残高（クレジット）が足りません。Anthropicのコンソールで残高をご確認ください",
   bad_model: "選んだモデルが使えません。「AIの設定」でモデルを「おすすめ」に戻してください",
   network: "インターネットに接続できませんでした。回線をご確認ください",
-  upstream_error: "AIの処理でエラーが起きました。少し待ってからもう一度押してください"
+  upstream_error: "AIの処理でエラーが起きました。少し待ってからもう一度押してください",
+  web_search_off: "ネット検索がAPIの組織の設定で無効になっています（Anthropicのコンソールの設定で有効にしてください）"
 };
 const errMsg = e => ERR[e?.code] || "AIの処理が途中で止まりました";
 const tier = () => ($("#hiAcc").checked ? "complex" : "default");
@@ -4333,7 +4546,14 @@ const normLabel = l => (l === "住宅地図" ? "拡大地図" : l === "航空写
 const ATT_RANK = { "広域地図": 3, "拡大地図": 3.1, "地図": 3.2, "航空写真": 3.3, "用途地域図": 4, "公図": 6 };
 const attRank = x => (x.ph ? 2 : x.r ? (regGroup(x.r) === 0 ? 5 : 5.1) : ATT_RANK[normLabel(x.m.label)] ?? 7);
 const mapRank = m => ATT_RANK[normLabel(m.label)] ?? 7;
-const labelFromName = n => { for (const [k, v] of MAP_KEYS) if (n.includes(k)) return v; return null; };
+/* 物件概要書・販売図面（他社の資料・ポータルの物件ページ・以前の概要書）は、内容の読み取りにだけ使い、作る物件資料には添付しない */
+const SHEET_NAME_RE = /販売図面|マイソク|チラシ|概要書|物件概要|物件情報|物件詳細|物件のご案内|売物件|レインズ|REINS|グーホーム|goo-?home|うちなーらいふ|uchina-?life|SUUMO|スーモ|アットホーム|athome|ホームズ|HOME'?S|楽待|健美家/i;
+const SHEET_TITLE_RE = /物件概要書|販売図面|物件概要|マイソク|物件のご案内|物件情報|売物件|物件詳細/;
+const SHOT_NAME_RE = /スクリーンショット|スクショ|screen ?shot|画面写し|画面キャプチャ|キャプチャ|capture|貼り付けた画像/i;
+const SHEET_NOTE = "物件概要書・販売図面（他社の資料など）のため、作る物件資料には添付しません。内容は読み取りに使います（添付する場合は✓）";
+const labelFromName = n => { if (SHEET_NAME_RE.test(n)) return "販売図面"; for (const [k, v] of MAP_KEYS) if (n.includes(k)) return v; return null; };
+// 自動で添付を外す（手で✓を入れたものはそのまま）
+const unattach = (m, note) => { if (!m || m.incManual) return false; const was = m.include; m.include = false; m.sheet = true; if (note) m.aiNote = note; return was; };
 
 async function addFiles(files) {
   if (S.sample) resetAll(true);
@@ -4350,11 +4570,14 @@ async function addFiles(files) {
         continue;
       }
       if (f.type.startsWith("image/") || /^(jpe?g|png|webp|gif|bmp)$/.test(ext)) {
-        const lb = labelFromName(f.name);
-        const g = await ingestImage(f, lb ? 3200 : 2400);
+        const lb = labelFromName(f.name), shot = !lb && SHOT_NAME_RE.test(f.name);
+        const g = await ingestImage(f, lb || shot ? 3200 : 2400);
         const item = { id: ++uid, name: f.name, url: g.url, w: g.w, h: g.h, thumb: g.thumb, include: true, caption: "" };
-        if (lb === "販売図面") { Object.assign(item, { label: lb, labelSrc: "name", auto: false, title: "", include: false, aiNote: "販売図面のため、資料には綴じずに内容を読み取ります（綴じる場合は✓）" }); S.maps.push(item); }
-        else if (lb) { Object.assign(item, { label: lb, labelSrc: "name", auto: true, title: "" }); S.maps.push(item); } else { item.include = S.photos.filter(p => p.include).length < 5; S.photos.push(item); queueEnhance(item); }
+        if (lb === "販売図面") { Object.assign(item, { label: lb, labelSrc: "name", auto: false, title: "", include: false, sheet: true, aiNote: SHEET_NOTE }); S.maps.push(item); }
+        else if (lb) { Object.assign(item, { label: lb, labelSrc: "name", auto: true, title: "" }); S.maps.push(item); }
+        // 画面写し・貼り付けた画像：ポータルの物件ページや他社の概要書のことが多いので、種類が分かるまで添付しない
+        else if (shot) { Object.assign(item, { label: "未分類", labelSrc: null, auto: true, title: "", include: false, autoInc: true, aiNote: "画面写し・貼り付けた画像のため、種類が分かるまで物件資料には添付しません（物件ページ・概要書なら読み取りに使います。写真・地図なら種類を選ぶか✓）" }); S.maps.push(item); }
+        else { item.include = S.photos.filter(p => p.include).length < 5; S.photos.push(item); queueEnhance(item); }
         continue;
       }
       const buf = await f.arrayBuffer();
@@ -4370,7 +4593,7 @@ async function addFiles(files) {
         const c = await renderPdfPage(pdf, 1, Math.min(2.2, 2400 / 842));
         S.reg.push({ id: ++uid, name: f.name, text: "", pages: pdf.numPages, parsed: null, scan: true, img: URL.createObjectURL(await canvasToBlob(c, 0.9)), w: c.width, h: c.height, thumb: thumbOf(c), file: f, pdf, include: true, sel: "", rot: Array(pdf.numPages).fill(0), rotSrc: Array(pdf.numPages).fill(null) });
         c.width = c.height = 0;
-      } else if (/レポート|report|REBC/i.test(f.name) || (pdf.numPages >= 8 && head0.replace(/\s/g, "").length < 20)) {
+      } else if (/レポート|report|REBC/i.test(f.name) || (pdf.numPages >= 8 && head0.replace(/\s/g, "").length < 20 && !SHEET_NAME_RE.test(f.name))) {
         const rep = { name: f.name, pdf, pages: pdf.numPages };
         rep.prep = prepReport(rep).catch(e => console.warn("prepReport", e));
         S.report = rep;
@@ -4378,7 +4601,12 @@ async function addFiles(files) {
         // 地図・図面・書類：複数ページのPDF（地図をまとめたもの等）は1ページずつ取り込む
         const nPages = Math.min(pdf.numPages, head0.replace(/\s/g, "").length > 200 ? 30 : 8), created = [];
         const all = await pdfText(pdf, 40, " "), allLen = all.replace(/\s/g, "").length;
-        const brochure = listingScore(all) >= 6 && pdf.numPages <= 6, ours = /大央ハウジング/.test(all);
+        // 物件概要書・販売図面・ポータルの物件ページ（どの会社のものでも）は、読み取りにだけ使って添付しない
+        const headFlat = head0.replace(/\s|\|/g, "").slice(0, 300), score = listingScore(all);
+        const headDoc = /重要事項説明書|売買契約書|賃貸借契約書|契約書|明細書|証明書|報告書|通知書|議事録|規約/.test(headFlat.slice(0, 120));
+        const ours = /大央ハウジング/.test(all) || /^(印刷用_)?物件概要書_.*_\d{8}/.test(f.name); // 自社の以前の資料（このアプリで書き出したものを含む）
+        const sheet = SHEET_NAME_RE.test(f.name) || (!headDoc && ((SHEET_TITLE_RE.test(headFlat) && score >= 3) || (score >= 6 && pdf.numPages <= 6)));
+        const brochure = sheet && !ours; // 他社の資料（読み取った値の確かさを控えめにし、社内メモに注意を書く）
         for (let n = 1; n <= nPages; n++) {
           const tx0 = n === 1 ? head0 : await pdfText(pdf, n, "", n), tx = n === 1 ? head : await pdfText(pdf, n, " | ", n);
           const pg = await pdf.getPage(n); const v1 = pg.getViewport({ scale: 1 });
@@ -4401,14 +4629,19 @@ async function addFiles(files) {
         // 書類・他社の販売図面・ポータルの物件ページ：中身を読み取る資料にも入れる
         // 用途地域図（属性表の文字がある都市計画図）・公図は地図として扱い、ここには入れない
         const contract = /重要事項|宅地建物取引士|売買契約|賃貸借契約|説明書|契約書|明細|証明書|報告書|議事録|規約/.test(all.replace(/\s/g, ""));
-        const zoningMap = !brochure && !contract && pdf.numPages <= 2 && !!parseZoning(all), kozuPdf = created.some(it => it.kind === "kozu");
-        if (!zoningMap && !kozuPdf && (brochure || created.some(it => it.label === "書類") || (contract && allLen >= 200))) {
-          const doc = addDoc({ kind: "pdf", name: f.name, text: all, pages: pdf.numPages, brochure: brochure && !ours, scan: allLen < 80 || Docs.looksGarbled(all) });
+        const zoningMap = !sheet && !contract && pdf.numPages <= 2 && !!parseZoning(all), kozuPdf = created.some(it => it.kind === "kozu");
+        if (sheet) {
+          // 物件概要書の束（概要書＋地図＋公図など）も、まとめて添付しない。地図・公図のページは種類を残す（必要なら✓で添付）
+          for (const [i, it] of created.entries()) {
+            if (it.kind !== "kozu" && (i === 0 || listingScore(it.text) >= 4 || !MAPISH.includes(normLabel(it.label)))) { it.label = "販売図面"; it.labelSrc = "text"; it.auto = false; it.title = ""; }
+            unattach(it, it.label === "販売図面" ? SHEET_NOTE : `物件概要書（${f.name}）の中のページのため、物件資料には添付しません（添付する場合は✓）`);
+          }
+        }
+        if (!zoningMap && (sheet || (!kozuPdf && (created.some(it => it.label === "書類") || (contract && allLen >= 200))))) {
+          const doc = addDoc({ kind: "pdf", name: f.name, text: all, pages: pdf.numPages, brochure, sheet, scan: allLen < 80 || Docs.looksGarbled(all) });
           created.forEach(it => { it.docId = doc.id; });
-          if (brochure && !ours) {
-            for (const it of created) { it.label = "販売図面"; it.labelSrc = "text"; it.auto = false; it.include = false; it.aiNote = "他社の販売図面・物件ページのため、資料には綴じずに内容を読み取ります（綴じる場合は✓）"; }
-            doc.photos = await addPdfPhotos(pdf, f.name, doc);
-          } else if (pdf.numPages > 8 && allLen >= 300) {
+          if (brochure) doc.photos = await addPdfPhotos(pdf, f.name, doc);
+          else if (!sheet && pdf.numPages > 8 && allLen >= 300) {
             for (const it of created) { it.include = false; it.aiNote = "ページ数の多い書類のため、資料には綴じずに内容を読み取ります（綴じる場合は✓）"; }
           }
         }
@@ -4608,8 +4841,8 @@ type：次のどれか1つ
 - 地積測量図／建物図面／間取り図：それぞれの図面
 - 物件写真：建物・土地・室内・設備・周辺などを撮った普通の写真
 - 登記簿：登記事項証明書（表題部・権利部の表）
-- 販売図面：不動産会社の物件チラシ・マイソク（写真・間取り・物件概要と会社名の帯がある広告）や、グーホーム・うちなーらいふ・SUUMO などの物件ページを印刷・画面写ししたもの
-- 書類：上のどれでもない文書・帳票（例：固定資産税の課税明細書、家賃の支払報告書、契約書、見積書、明細書）
+- 販売図面：物件を紹介する資料。不動産会社（どの会社のものでも）の物件チラシ・マイソク・物件概要書・物件資料（物件概要の表だけのものも含む）、レインズの物件詳細、グーホーム・うちなーらいふ・SUUMO などの物件ページを印刷・画面写ししたもの
+- 書類：上のどれでもない文書・帳票（例：固定資産税の課税明細書、家賃の支払報告書、契約書、見積書、明細書）。物件概要書は書類ではなく販売図面
 - その他：上のどれにも当たらないもの
 title：type が「書類」「販売図面」「その他」のとき、その資料の名前（14字以内。例：課税明細書、家賃支払報告書）。それ以外は ""
 rotate：正しい向きにするための時計回りの角度（0・90・180・270）。文字・表が読める向き、写真は空が上
@@ -4630,14 +4863,16 @@ JSONだけ: {"items":[{"type":"広域地図","title":"","rotate":0}]}`, { images
         if (m.labelSrc === "name" && MAPISH.includes(m.label) && MAPISH.includes(type)) continue; // ファイル名の地図の種類は尊重（中身が書類・写真なら直す）
         if (m.label !== type) { m.aiNote = `種類をAIが判定：${type}${title ? "（" + title + "）" : ""}`; }
         m.label = type; m.labelSrc = "ai"; m.title = isDocLabel(type) ? title || m.title || "" : "";
-        if (type === "販売図面" && m.include) { m.include = false; m.aiNote = "販売図面（他社の広告など）のため、資料には綴じずに内容を読み取ります（綴じる場合は✓）"; }
+        if (type === "販売図面") unattach(m, SHEET_NOTE);
+        else if (m.autoInc && !m.incManual && !m.sheet && MAPISH.includes(type)) { m.include = true; m.aiNote = `種類をAIが判定：${type}（物件資料に添付します）`; }
+        m.autoInc = false;
         if (isDocLabel(type)) res.docs++; else res.maps++;
       } else {
         const p = t.p; p.checked = true;
         if (type === "物件写真" || type === "その他") continue;
         S.photos = S.photos.filter(y => y !== p);
         if (type === "登記簿") { S.reg.push({ id: ++uid, name: p.name, text: "", pages: 1, parsed: null, scan: true, img: p.url, include: true, sel: "", rotSrc: [p.rotSrc || null] }); res.regs++; continue; }
-        S.maps.push({ id: p.id, name: p.name, url: p.url, w: p.w, h: p.h, thumb: p.thumb, label: type, labelSrc: "ai", title: isDocLabel(type) ? title : "", include: type !== "販売図面", auto: false, text: "", rot: p.rot, rotSrc: p.rotSrc, rotNote: p.rotNote, aiNote: `写真の欄から移しました（AI：${type}${title ? "・" + title : ""}）` });
+        S.maps.push({ id: p.id, name: p.name, url: p.url, w: p.w, h: p.h, thumb: p.thumb, label: type, labelSrc: "ai", title: isDocLabel(type) ? title : "", include: type !== "販売図面", sheet: type === "販売図面", auto: false, text: "", rot: p.rot, rotSrc: p.rotSrc, rotNote: p.rotNote, aiNote: type === "販売図面" ? `写真の欄から移しました（AI：販売図面・物件概要書）。${SHEET_NOTE}` : `写真の欄から移しました（AI：${type}${title ? "・" + title : ""}）` });
         if (isDocLabel(type)) res.docs++; else res.maps++;
       }
     }
@@ -4810,7 +5045,29 @@ JSONだけ: {"order":[2,0,5,1,3],"captions":{"2":"外観（南側）","0":"…"}
 
 /* ---------- AI 4：アピールポイント・キャッチコピー ---------- */
 const QKEYS = ["price", "gakku", "chimoku", "zoning", "kenpei", "yoseki", "kyokai", "areaJissoku", "genkyo", "kensa", "gas", "gesui", "josui", "bouka", "keikan", "road", "frontage", "addrDisp", "built", "torihiki", "kokai", "name", "other", "remarks"];
-const PT_LABELS = ["交通", "立地", "土地", "法令", "生活利便", "商業性", "歴史・文化", "将来性"];
+const PT_LABELS = ["交通", "立地", "土地", "法令", "生活利便", "教育", "医療", "自然・眺望", "商業性", "収益", "歴史・文化", "将来性"];
+/* 不動産の表示に関する公正競争規約で、根拠なく使えない（または使い方に注意が必要な）言葉 */
+const NG_RE = /完全|完璧|完ぺき|絶対|万全|日本一|日本初|業界一|業界初|No\.?\s?1|ナンバーワン|当社だけ|他に類を見ない|抜群|特選|厳選|最高|最上|最良|最安|最低価格|買得|掘出|掘り出し|土地値|格安|投売|投げ売り|破格|特安|激安|バーゲン|安値|売れ行き好調|大人気|超(?!高層|え|過|す)/g;
+function checkNg() {
+  const hit = t => [...new Set(String(t || "").match(NG_RE) || [])];
+  const warn = w => `広告の規約で使い方に注意が必要な言葉（${w.join("・")}）があります。根拠を確認するか言い換えてください`;
+  const all = [];
+  for (const k of ["title", "catch1", "catch2"]) { const w = hit(S.d[k]); if (w.length) { S.unc.add(k); addNote(k, warn(w)); all.push(...w); } }
+  const wp = [...new Set(S.d.points.flatMap(p => hit(p.text)))]; if (wp.length) { S.unc.add("points"); addNote("points", warn(wp)); all.push(...wp); }
+  return [...new Set(all)];
+}
+// アピールポイント・キャッチコピーの書き方（自動作成と「別案」で共通）
+function copyRules() {
+  return `■書き方（魅力をしっかり打ち出す）
+- アピールポイントは6項目。上の資料から、この物件ならではの強みを6つ選ぶ（同じ観点を重ねない）。観点：交通（駅・バス停・空港・幹線道路）／立地（エリアの性格・ランドマーク）／土地（面積・坪数・形・間口・前面道路・角地・二方道路・高台）／法令（用途地域・容積率から考えられる活用）／生活利便（スーパー・コンビニ・ドラッグストア・銀行など）／教育（学校区・学校までの距離）／医療（病院・クリニック）／自然・眺望（公園・海・標高）／商業性（観光・人の流れ・幹線道路沿い）／収益（賃料・利回り）／歴史・文化（地名の由来・史跡）／将来性（開発・地価・人口）。
+- 1項目は「具体的な事実（施設名・距離・徒歩分数・面積・数字）」＋「それが買主・投資家にとって何を意味するか（暮らしやすさ・活用の幅・収益性・資産性）」を1〜2文で。text は70字以内。
+- 施設名・距離・徒歩分数・数字は、上の資料（周辺環境の調査を含む）にあるものだけを使う。徒歩分数は「周辺環境の調査」の値をそのまま使い、自分で計算・推測しない。道路距離がない施設は「約○m」「約○km」と書き、徒歩分数は付けない。
+- 「便利」「充実」「人気」「閑静」などの評価の言葉は、裏付けとなる事実（距離・件数・出典）を同じ文に書くときだけ使う。
+- 不動産広告の規約で根拠なく使えない言葉（最高・最高級・最上・抜群・絶対・完璧・万全・日本一・業界一・超・格安・激安・破格・掘出し・お買い得・特選・厳選・人気No.1 など）は使わない。
+- 欠点（ハザード・規制・古さなど）はアピールポイントに書かない（internal へ）。標高は高い場合（おおむね20m以上）だけ、安心材料として書いてよい。
+- label は ${PT_LABELS.join("・")} から選ぶ。basis にはその項目の根拠（資料名・施設名・出典URL）を短く書く（資料には載らない）。
+- title は【エリア名・特徴 物件種別】の形で28字以内。catch1 は立地と土地の一番の強み（50字以内）、catch2 は想定される活用と価値（55字以内）。どちらも具体的な地名・施設名・数字を入れる。`;
+}
 function compactRegistry(t) {
   t = t.split(/共\s*同\s*担\s*保\s*目\s*録/)[0];
   return t.replace(/[┃│━─┠┨┏┓┗┛┯┷┼┬┴├┤]/g, " ").replace(/[ 　]{2,}/g, " ").replace(/\n\s*\n+/g, "\n");
@@ -4825,7 +5082,7 @@ async function aiCopy() {
   const memo = $("#memo").value.trim();
   const regs = S.reg.map((r, i) => `--- 登記簿${i + 1}（${r.name}）---\n${compactRegistry(r.text)}`).join("\n").slice(0, 18000);
   const prompt = `あなたは沖縄県那覇市の不動産会社「株式会社大央ハウジング」の売買担当で、販売図面のコピーライティングが得意です。
-次の調査結果をもとに、物件概要書の最上部に載せる「キャッチコピー」と「物件のアピールポイント」を作ってください。
+次の調査結果をもとに、物件概要書の最上部に載せる「キャッチコピー」と「物件のアピールポイント」を作ってください。買主・投資家が「この物件を見に行きたい」と思うように、物件の魅力をしっかり打ち出してください。
 
 ■物件（登記簿・図面から確定した情報）
 ${propertySummary()}
@@ -4833,8 +5090,11 @@ ${propertySummary()}
 ■物件レポート（REBC）の読み取り結果
 ${S.facts ? JSON.stringify(S.facts) : "（なし）"}
 
-■公図・地図の読み取り結果
+■公図・地図の読み取り結果（道路・間口・敷地の形・角地）
 ${S.site ? JSON.stringify(S.site) : "（なし）"}
+
+■周辺環境の調査（地図：OpenStreetMap・国土地理院。距離は物件から施設までの徒歩ルートの道路距離、徒歩分数は80m=1分・端数切り上げ）とネット検索の結果
+${researchText()}
 
 ■担当者メモ
 ${memo || "（なし）"}
@@ -4842,18 +5102,12 @@ ${memo || "（なし）"}
 ■登記簿（社内確認用。罫線除去済み）
 ${regs || "（なし）"}
 
-■書き方
-- アピールポイントは5〜6項目。物件に合う観点を選ぶ: 交通（駅・バス停・空港・幹線道路）／立地（エリアの性格・ランドマークとの近さ）／土地（面積・坪数・形状・間口・前面道路・平坦か高台か）／法令（用途地域・容積率から考えられる活用）／生活利便（スーパー・病院・学校などの件数や距離）／商業性（観光・ホテル・人の流れ）／歴史・文化（地名の由来・史跡・まちの成り立ち）／将来性（地価の推移・観光客数など）。
-- 数字・固有名詞は上の資料にあるものだけを使う。歴史・文化・エリアの性格は、広く知られた事実だけを書く（確信がないことは書かない）。
-- 不動産広告の規約で根拠なく使えない言葉（最高・最高級・最上・抜群・絶対・完璧・万全・日本一・業界一・超・格安・激安・破格・掘出し・特選・厳選など）は使わない。
-- 欠点（ハザード・規制など）はアピールポイントに書かず internal へ。
-- label は ${PT_LABELS.join("・")} から選ぶ。text は60字以内。
-- title は【エリア名・特徴 物件種別】の形で28字以内。catch1 は立地と土地の魅力（50字以内）、catch2 は想定される活用と価値（55字以内）。
+${copyRules()}
 - name は「前島三丁目一棟ビル」のような物件名。
 - questions は、図面に必要なのに資料から分からない項目を担当者へ確認する質問（最大5件）。key は ${QKEYS.join("/")} のいずれか（備考に追記するものは "remarks"）。options は回答の候補（なければ []）。
 - internal は社内メモ: 現在の所有者、乙区で抹消されていない権利の有無と内容、ハザード、確認が必要な法令（臨港地区・景観の届出など）を短く。
 ${S.d.gakku ? "" : "- gakku は、所在地の公立小学校・中学校の通学区域（学区）の指定校。資料にないため、所在地の町名・丁目から分かる範囲で答える。確信がなければ空文字にする（近いだけの学校を書かない）。\n"}JSONだけを返してください。
-{"title":"…","catch1":"…","catch2":"…","points":[{"label":"交通","text":"…"}],"name":"…","questions":[{"key":"kyokai","q":"…","options":["確定済","未確定"]}],"internal":"…"${S.d.gakku ? "" : ',"gakku":{"elem":"○○小学校","junior":"○○中学校"}'},"uncertain":["推測を含む項目のキー"]}`;
+{"title":"…","catch1":"…","catch2":"…","points":[{"label":"交通","text":"…","basis":"…"}],"name":"…","questions":[{"key":"kyokai","q":"…","options":["確定済","未確定"]}],"internal":"…"${S.d.gakku ? "" : ',"gakku":{"elem":"○○小学校","junior":"○○中学校"}'},"uncertain":["推測を含む項目のキー"]}`;
   return AI.fn.json(prompt, { modelTier: tier() });
 }
 
@@ -4981,7 +5235,7 @@ const listingScore = t => { const s = String(t || "").replace(/\s/g, ""); return
 function addDoc(o) {
   const doc = { id: ++uid, include: true, ...o };
   if ("text" in o && !String(o.text || "").trim() && o.kind !== "pdf") doc.res = { err: true, msg: "文字が入っていませんでした" };
-  if (doc.kind !== "pdf" && doc.kind !== "image" && listingScore(doc.text) >= 6) doc.brochure = !/大央ハウジング/.test(doc.text);
+  if (doc.kind !== "pdf" && doc.kind !== "image" && listingScore(doc.text) >= 6) { doc.sheet = true; doc.brochure = !/大央ハウジング/.test(doc.text); }
   S.docs.push(doc); return doc;
 }
 // 他社の販売図面・物件ページのPDFに埋め込まれた写真・図面を取り出す（種類は自動作成でAIが見分ける）
@@ -5013,14 +5267,15 @@ function ensureDocsFromMaps() {
     if (!groups.has(key)) groups.set(key, []); groups.get(key).push(m);
   }
   for (const ms of groups.values()) {
-    const doc = addDoc({ kind: "image", name: ms[0].srcPdf || ms[0].name, brochure: ms.some(m => m.label === "販売図面") });
+    const sh = ms.some(m => m.label === "販売図面" || m.sheet);
+    const doc = addDoc({ kind: "image", name: ms[0].srcPdf || ms[0].name, brochure: sh, sheet: sh });
     ms.forEach(m => { m.docId = doc.id; });
   }
 }
 
 const DOC_FIELDS = { name: "物件名", addrReg: "所在地（登記簿上）", addrDisp: "住居表示", gakku: "学校区", chimoku: "地目", genkyo: "現況", kenri: "権利", kyokai: "境界", areaKobo: "公簿面積", areaJissoku: "実測面積", road: "道路", frontage: "間口", built: "築年月", kensa: "検査済", denki: "電気", josui: "上水道", gas: "ガス", gesui: "下水道", zoning: "用途地域", kenpei: "建ぺい率", yoseki: "容積率", bouka: "防火指定", keikan: "景観条例", other: "その他の法令制限", zoning2: "用途地域②", kenpei2: "建ぺい率②", yoseki2: "容積率②", price: "価格" };
 const DEFAULTS = EMPTY();
-const SRC_RANK = { manual: 100, reg: 90, memo: 85, map: 70, web: 62, rep: 60, ai: 55 };
+const SRC_RANK = { manual: 100, reg: 90, memo: 85, map: 70, web: 62, rep: 60, near: 58, ai: 55 };
 const DOC_RANK = { 高: 80, 中: 65, 低: 50 };
 // 今の値がどれだけ確かか（手入力・登記簿は強く、物件レポートやAIの推定は弱い。何も入っていなければ0）
 function srcRank(k) {
@@ -5095,7 +5350,8 @@ price：価格（例：7,594万円）
 【返す形】JSONだけを返す：
 {"docType":"資料の種類（例：重要事項説明書／レントロール／課税明細書／他社の販売図面／ポータルサイトの物件ページ／賃貸借契約書／メモ）",
  "summary":"資料の要点（40字以内）",
- "isOtherCompanyAd":他社の販売図面・広告・ポータルサイトの物件情報なら true、それ以外は false,
+ "isOtherCompanyAd":他社（大央ハウジング以外）が作った販売図面・物件概要書・広告・ポータルサイトの物件情報なら true、それ以外は false,
+ "isPropertySheet":物件を紹介する資料（物件概要書・販売図面・マイソク・物件資料・ポータルサイトの物件ページなど。どの会社のものでも）なら true、重要事項説明書・契約書・明細書などの書類なら false,
  "sourceCompany":"他社の資料なら、その会社名（元付業者・掲載元）。なければ空文字",
  "fields":{"キー":{"value":"値","evidence":"資料のどこに書いてあるか（20字以内）","confidence":"高|中|低"}},
  "transport":[{"line":"路線・バス会社","stop":"駅・停留所","walk":"徒歩○分"}],
@@ -5222,7 +5478,9 @@ function applyDocRead(doc, o, cap) {
   const intern = (Array.isArray(o.internal) ? o.internal : []).map(x => String(x || "").trim()).filter(Boolean).slice(0, 8);
   if (other) intern.unshift(`他社の資料（${String(o.sourceCompany || "").trim() || "会社名不明"}・${o.docType || "販売図面"}「${doc.name}」）を元に作成しました。広告に使う前に、元付業者の広告掲載の承諾と、写真・図面を使ってよいかを確認してください。`);
   for (const t of intern) if (!String(S.internal || "").includes(t)) { S.internal = [S.internal, t].filter(Boolean).join("\n"); st.internal++; }
-  if (other) S.maps.filter(m => m.docId === doc.id && m.include).forEach(m => { m.include = false; m.aiNote = "他社の資料のため、資料には綴じていません（綴じる場合は✓）"; });
+  // 物件概要書・販売図面（他社のもの・ポータルの物件ページ・以前の概要書）は、作る物件資料に添付しない
+  const sheet = other || o.isPropertySheet === true || o.isPropertySheet === "true" || /概要書|販売図面|マイソク|チラシ|物件ページ|物件資料|物件情報|物件詳細|ポータル|広告/.test(String(o.docType || ""));
+  if (sheet) { doc.sheet = true; S.maps.filter(m => m.docId === doc.id).forEach(m => unattach(m, SHEET_NOTE)); }
   doc.other = other; doc.docType = String(o.docType || "").slice(0, 24); doc.company = other ? String(o.sourceCompany || "").slice(0, 30) : "";
   return st;
 }
@@ -5281,8 +5539,9 @@ function ruleRead(text) {
   return got;
 }
 function guessDocType(doc, other) {
-  const t = String(doc.text || "").replace(/\s/g, "");
-  if (/重要事項説明/.test(t)) return "重要事項説明書";
+  const t = String(doc.text || "").replace(/\s/g, ""), head = t.slice(0, 200);
+  if (doc.sheet && !/重要事項説明書/.test(head)) return PORTAL_RE.test(t) ? "ポータルサイトの物件ページ" : other ? "他社の物件概要書・販売図面" : "物件概要書・販売図面";
+  if (/重要事項説明書/.test(head) || (/重要事項説明/.test(t) && !doc.sheet)) return "重要事項説明書";
   if (/レントロール|賃料一覧|入居者一覧/.test(t + doc.name)) return "レントロール";
   if (/課税明細|納税通知|評価証明/.test(t + doc.name)) return "固定資産税の書類";
   if (/売買契約/.test(t)) return "売買契約書";
@@ -5335,18 +5594,78 @@ function ruleDoc(doc) {
   if (!company && other) { const m = z2h(doc.text).match(/(?:株式会社|有限会社|\(株\)|（株）)\s?[^\s　、。,()（）]{1,16}|[^\s　、。,()（）]{1,16}(?:株式会社|不動産)/g); company = (m || []).find(x => !/大央/.test(x)) || ""; }
   company = company.replace(/\s*(TEL|ＴＥＬ|Tel|電話|℡|FAX|ＦＡＸ|免許|〒|担当).*$/, "").trim();
   if (other && g["i:取引態様"]) internal.push(`他社の資料の取引態様：${g["i:取引態様"]}`);
-  return { docType: guessDocType(doc, other), isOtherCompanyAd: other, sourceCompany: company.slice(0, 30), fields: f, transport: tr, buildings: bl, extra, remarks: [], internal };
+  return { docType: guessDocType(doc, other), isOtherCompanyAd: other, isPropertySheet: !!doc.sheet || listingScore(doc.text) >= 6, sourceCompany: company.slice(0, 30), fields: f, transport: tr, buildings: bl, extra, remarks: [], internal };
 }
 // AIを使わずに、資料の数字からアピールポイントの下書きを作る
+// 用途地域から言える活用（広く知られた建築基準法の用途制限の範囲）
+const ZONE_USE = {
+  "第一種低層住居専用地域": "低層住宅が中心の、落ち着いた住環境が守られた地域です",
+  "第二種低層住居専用地域": "低層住宅が中心の住宅地で、小規模な店舗も建てられます",
+  "第一種中高層住居専用地域": "中高層の共同住宅も建てられる住宅地です",
+  "第二種中高層住居専用地域": "共同住宅のほか、一定規模までの店舗・事務所も計画できます",
+  "第一種住居地域": "住宅を中心に、一定規模までの店舗・事務所・ホテルも計画できます",
+  "第二種住居地域": "住宅のほか、店舗・事務所・ホテルなど幅広い用途に対応できます",
+  "準住居地域": "住宅のほか、店舗・事務所・ホテル・倉庫など幅広い用途に対応できます",
+  "田園住居地域": "農地と調和した、低層住宅中心の住環境です",
+  "近隣商業地域": "住宅・店舗・事務所・ホテルなど、幅広い用途に対応できます",
+  "商業地域": "店舗・事務所・ホテル・共同住宅など、幅広い用途に対応できます",
+  "準工業地域": "住宅のほか、店舗・事務所・倉庫・工場など幅広い用途に対応できます",
+  "工業地域": "倉庫・工場など事業用地として活用できます"
+};
+// AIを使わない（またはAIが失敗した）ときの下書き：資料の数字と、地図で調べた周辺の施設から作る
 function rulePoints() {
-  const d = S.d, pts = [], ex = d.extra || [];
-  const tr = d.transport.find(r => r.stop); if (tr) pts.push({ label: "交通", text: `${tr.line ? tr.line + " " : ""}${tr.stop}${tr.walk ? " " + tr.walk : ""}`.trim() });
-  const a = num(d.areaKobo) || num(d.areaJissoku); if (a) pts.push({ label: "土地", text: `${num(d.areaKobo) ? "公簿" : "実測"}${a.toFixed(2)}㎡（約${(a * 0.3025).toFixed(1)}坪）${d.chimoku ? "・地目" + d.chimoku : ""}` });
-  if (d.zoning) pts.push({ label: "法令", text: `${d.zoning}${d.kenpei ? "・建ぺい率" + d.kenpei : ""}${d.yoseki ? "・容積率" + d.yoseki : ""}` });
-  if (d.gakku) pts.push({ label: "学区", text: d.gakku });
+  const d = S.d, pts = [], ex = d.extra || [], R = S.research, F = R?.fac || [];
+  const near = (...cats) => F.filter(f => cats.includes(f.cat)).sort((a, b) => (a.road ?? a.straight * 1.3) - (b.road ?? b.straight * 1.3))[0];
+  const q = f => `「${f.name}」${facDist(f)}`;
+  const within = (f, m) => f && (f.road ?? f.straight * 1.3) <= m;
+  // 交通
+  const tr0 = d.transport.filter(r => r.stop), isRail = r => /ゆいレール|モノレール|駅$/.test(r.line + r.stop);
+  // 一番近いバス停と駅を1つずつ（なければ近い順に2つ）
+  const tr = tr0.some(isRail) && tr0.some(r => !isRail(r)) ? [tr0.find(r => !isRail(r)), tr0.find(isRail)] : tr0;
+  if (tr.length) {
+    const t = tr.slice(0, 2).map(r => `${/ゆいレール|モノレール/.test(r.line) ? "ゆいレール" : /バス/.test(r.line) || !r.line ? "バス停" : r.line}「${r.stop}」${r.walk}`).join("、");
+    const short = tr.some(r => { const m = String(r.walk).match(/(\d+)\s*分/); return m && +m[1] <= 10; });
+    pts.push({ label: "交通", text: `${t}。${short ? "公共交通での移動がしやすい立地です。" : ""}` });
+  }
+  // 生活利便
+  const sup = near("スーパー"), cvs = near("コンビニ"), drg = near("ドラッグストア"), mall = near("商業施設");
+  const daily = [sup, cvs, drg].filter(f => within(f, 1200));
+  if (daily.length) {
+    const c = R?.counts || {}, cnt = [c["コンビニ"] >= 2 && `コンビニ${c["コンビニ"]}店`, c["スーパー"] >= 2 && `スーパー${c["スーパー"]}店`].filter(Boolean).join("・");
+    pts.push({ label: "生活利便", text: `${daily.slice(0, 2).map(q).join("、")}${cnt ? `。半径1km以内に${cnt}` : ""}。日々の買い物に便利です。` });
+  } else if (mall && within(mall, 3000)) pts.push({ label: "生活利便", text: `${q(mall)}。大型の商業施設が身近です。` });
+  // 教育（学校区）
+  const elem = near("小学校", "小中学校"), jr = near("中学校", "小中学校");
+  if (d.gakku) pts.push({ label: "教育", text: `${d.gakku.replace(/\s+/g, "・")}。${/徒歩約?([1-9]|1[0-5])分/.test(d.gakku) ? "通学しやすい距離です。" : ""}` });
+  else if (within(elem, 1200)) pts.push({ label: "教育", text: `${q(elem)}${jr && within(jr, 1600) && jr !== elem ? `、${q(jr)}` : ""}。お子さまの通学にも安心の距離です。` });
+  // 医療
+  const hos = near("病院"), cl = (R?.counts || {})["クリニック"];
+  if (within(hos, 2000) || cl >= 3) pts.push({ label: "医療", text: `${hos && within(hos, 3000) ? q(hos) : ""}${hos && within(hos, 3000) && cl >= 3 ? "、" : ""}${cl >= 3 ? `半径1km以内にクリニック${cl}件` : ""}。医療機関が身近にそろっています。` });
+  // 自然
+  const park = near("公園"), beach = near("ビーチ");
+  if (within(park, 800)) pts.push({ label: "自然・眺望", text: `${q(park)}。散歩や子どもの遊び場に使える公園が近くにあります。` });
+  else if (within(beach, 3000)) pts.push({ label: "自然・眺望", text: `${q(beach)}。海が身近な暮らしを楽しめます。` });
+  // 土地
+  const a = num(d.areaKobo) || num(d.areaJissoku);
+  if (a) {
+    const tsubo = +TSUBO(a), shape = S.site?.shape && /整形/.test(S.site.shape) && !/不整形/.test(S.site.shape) ? S.site.shape : "";
+    const corner = S.site?.corner || /角地/.test(d.frontage || ""), roads = String(d.road || "").split("／").filter(Boolean).length;
+    const merit = [tsubo >= 100 && "まとまった広さで、活用の幅が広い土地です", shape && `${shape}で建物のプランが立てやすい形です`, corner && "角地で開放感があります", !corner && roads >= 2 && "二方向が道路に面しています"].filter(Boolean)[0] || "";
+    const parts = [`${num(d.areaKobo) ? "公簿" : "実測"}${fmtM2(a)}㎡（約${tsubo.toFixed(2)}坪）`];
+    if (d.road && !/要確認/.test(d.road)) parts.push(`前面道路 ${String(d.road).split("／")[0].replace(/（[^）]*）$/, "").trim()}`);
+    if (d.frontage) parts.push(`間口 ${String(d.frontage).split("／")[0].replace(/^.*?側\s*/, "").replace(/（角地）/, "").trim()}`);
+    pts.push({ label: "土地", text: `${parts.join("・")}。${merit ? merit + "。" : ""}` });
+  }
+  // 法令
+  if (d.zoning) { const use = ZONE_USE[normZone(d.zoning)] || ""; pts.push({ label: "法令", text: `${d.zoning}${d.kenpei ? "・建ぺい率" + d.kenpei : ""}${d.yoseki ? "・容積率" + d.yoseki : ""}。${use ? use + "。" : ""}` }); }
+  // 収益
   const inc = ex.find(x => /年間賃料|年収|年間収入/.test(x.label)), yl = ex.find(x => /利回り/.test(x.label));
-  if (inc || yl) pts.push({ label: "収益", text: [inc && `${inc.label} ${inc.value}`, yl && `${yl.label} ${yl.value}`].filter(Boolean).join("・") });
-  return pts.slice(0, 5);
+  if (inc || yl) pts.push({ label: "収益", text: `${[inc && `${inc.label} ${inc.value}`, yl && `${yl.label} ${yl.value}`].filter(Boolean).join("・")}。収益物件としても検討できます。` });
+  // 標高（高いときだけ）
+  if (R?.elev != null && R.elev >= 20 && pts.length < 6) pts.push({ label: "立地", text: `標高約${Math.round(R.elev)}m（国土地理院の標高データ）の高台に位置します。` });
+  // 大事な順に6つまで（交通・生活利便・土地・法令を先に）
+  const order = ["交通", "生活利便", "土地", "法令", "教育", "収益", "医療", "自然・眺望", "立地"];
+  return pts.sort((x, y) => order.indexOf(x.label) - order.indexOf(y.label)).slice(0, 6).map(p => ({ ...p, text: p.text.replace(/。$/, "。").trim() }));
 }
 // 読み取っていない資料をAIで読む（AIを使わないときは文字から簡易読み取り）（自動作成の途中と、「資料を読み取る」ボタンから）
 async function readDocs(onStep) {
@@ -5490,7 +5809,13 @@ async function applyPhotos(r) {
 function applyCopy(c) {
   if (!c || typeof c !== "object") return;
   for (const k of ["title", "catch1", "catch2"]) if (c[k]) setv(k, String(c[k]), "ai", { unc: true, note: "AIが作成。事実と表現を確認してください" });
-  if (Array.isArray(c.points) && c.points.length) { S.d.points = c.points.slice(0, 6).map(p => ({ label: String(p.label || "").slice(0, 6), text: String(p.text || "") })); S.src.points = "ai"; S.unc.add("points"); S.notes.points = "資料の数値とAIの知識から作成。固有名詞・数字・歴史の記述を確認してください"; }
+  if (Array.isArray(c.points) && c.points.length) {
+    S.d.points = c.points.slice(0, 6).map(p => ({ label: String(p.label || "").slice(0, 6), text: String(p.text || ""), basis: String(p.basis || "").slice(0, 160) })).filter(p => p.text);
+    S.src.points = "ai"; S.unc.add("points");
+    const R = S.research, used = [R?.fac?.length && "周辺施設の地図調査（道路距離）", R?.web?.facts?.length && "ネット検索", S.facts && "物件レポート"].filter(Boolean);
+    S.notes.points = `資料${used.length ? "・" + used.join("・") : ""}からAIが作成。固有名詞・数字・徒歩分数・歴史の記述を確認してください（各項目の下に根拠）`;
+    if (R) R.used = !!R.fac?.some(f => f.road);
+  }
   if (c.name && !["manual", "reg", "doc", "memo"].includes(S.src.name)) setv("name", String(c.name), "ai", { unc: true });
   for (const t of String(c.internal || "").split("\n").map(x => x.trim()).filter(Boolean)) if (!String(S.internal || "").includes(t)) S.internal = [S.internal, t].filter(Boolean).join("\n");
   if (!S.d.gakku && c.gakku && S.src.gakku !== "manual") {
@@ -5502,6 +5827,7 @@ function applyCopy(c) {
       .map(q => ({ key: q.key, q: String(q.q), options: Array.isArray(q.options) ? q.options.map(String).slice(0, 4) : [] }));
     S.questions = [...S.questions, ...add];
   }
+  checkNg();
 }
 function baseQuestions() {
   const d = S.d, q = [], has = k => S.questions.some(x => x.key === k);
@@ -5526,6 +5852,185 @@ function baseQuestions() {
   S.questions = [...q.filter(x => x.pri), ...S.questions, ...q.filter(x => !x.pri)].map(({ pri, ...x }) => x).slice(0, 12);
 }
 
+/* ---------- 周辺環境とネットを調べる（アピールポイントの材料） ----------
+   地図（無料・APIキー不要）：国土地理院で住所の位置、OpenStreetMap で周辺の施設と徒歩の道のり、国土地理院で標高。
+   ネット（AIの設定があるパソコン版・Web版）：AIがウェブ検索で地域の特徴・開発・歴史・学校区を出典つきで調べる。 */
+const NO_NET = "claude.ai版では外部の地図サービス・ネット検索に接続できないため省略しました（Web版・パソコン版で使えます）";
+const RS_PICK = [["駅", 3], ["バス停", 3], ["スーパー", 2], ["コンビニ", 2], ["小学校", 2], ["中学校", 2], ["小中学校", 1], ["病院", 2], ["公園", 2], ["ドラッグストア", 1], ["商業施設", 2], ["クリニック", 1], ["幼稚園・保育園", 1], ["銀行", 1], ["郵便局", 1], ["役所", 1], ["図書館", 1], ["高校", 1], ["ビーチ", 1], ["空港", 1], ["港・ターミナル", 1]];
+const roadWalk = m => { const w = Math.max(1, Math.ceil(m / 80)); return w <= 2 ? `徒歩${w}分` : `徒歩約${w}分`; }; // 道路距離から（80m=1分・端数切り上げ）
+const fmtDist = m => (m < 100 ? `約${Math.round(m)}m` : m < 1000 ? `約${Math.round(m / 10) * 10}m` : `約${(Math.round(m / 100) / 10).toFixed(1)}km`);
+const WALK_MAX = 2400; // 徒歩30分（2.4km）を超える施設は距離だけ書く
+const facDist = f => (f.road ? (f.road <= WALK_MAX ? `${fmtDist(f.road)}（${roadWalk(f.road)}）` : fmtDist(f.road)) : `直線${fmtDist(f.straight)}`);
+const normName = n => z2h(String(n || "")).replace(/[\s　・()（）「」]/g, "").replace(/^(沖縄県)?[^\s]{1,6}?[市町村]立/, "").replace(/駅$|バス停$|停留所$/, "");
+const sameName = (a, b) => { const x = normName(a), y = normName(b); return !!x && !!y && (x === y || (Math.min(x.length, y.length) >= 3 && (x.includes(y) || y.includes(x)))); };
+function researchQueries() {
+  const d = S.d, out = [];
+  const clean = v => z2h(String(v || "")).replace(/\s+/g, "").replace(/（[^）]*）|\([^)]*\)/g, "");
+  const disp = clean(d.addrDisp), reg = clean(d.addrReg).split(/[、,，]/)[0], rep = clean(S.facts?.address);
+  for (const a of [disp, rep, reg]) if (a) { out.push(a); out.push(a.replace(/(\d+)番地?(\d+)号?$/, "$1-$2").replace(/(\d+)番地?$/, "$1")); }
+  for (const a of [disp, reg, rep]) if (a) { const t = (a.match(/^.*?丁目/) || [a.replace(/\d.*$/, "")])[0]; if (t.length >= 4) out.push(t); } // 丁目・字まで
+  return [...new Set(out.filter(x => x && x.length >= 4))].slice(0, 7);
+}
+async function aiWebResearch() {
+  const d = S.d, addr = d.addrDisp || d.addrReg || S.facts?.address || "";
+  const city = /石垣/.test(addr) ? "Ishigaki" : /宮古/.test(addr) ? "Miyakojima" : /那覇/.test(addr) ? "Naha" : "";
+  const o = await AI.fn.json(`あなたは沖縄県の不動産会社「株式会社大央ハウジング」の物件調査担当です。ウェブ検索で、次の物件の販売図面（物件概要書）に載せる「物件の魅力」の裏付けになる事実を調べてください。
+
+■物件
+${propertySummary()}
+
+■調べること（検索は4回まで。所在地の町名・字・番地で検索してよい）
+1. エリアの性格と人気の理由（住宅地・商業地・観光地としての特徴）、近くのランドマーク・観光地・大きな施設
+2. 交通：最寄りの駅・幹線道路・インターチェンジ、那覇空港や市の中心部までの距離・所要時間
+3. 将来性：再開発・新しい商業施設・道路や駅の整備計画、地価や人口の動き（年と数字が分かるもの）
+4. 歴史・文化：地名の由来、史跡、まちの成り立ち（確かな出典があるものだけ）
+5. 学校区：所在地の公立小学校・中学校の通学区域（市町村・教育委員会の公開資料で確認）。番地や号で分かれる地域はその旨
+6. 社内確認用：ハザード（浸水・津波・土砂災害の想定）、景観計画・臨港地区・地区計画などの規制
+
+■条件
+- 出典URLのある事実だけを書く。推測しない。数字には年・時点を付ける。
+- 物件の所有者・入居者など個人のことは調べない・書かない。
+- 欠点（ハザードなど）は facts に入れず、hazards・rules に入れる。
+
+JSONだけを返す:
+{"area":"エリアの性格（80字以内）","facts":[{"kind":"交通|立地|生活利便|教育|医療|自然・眺望|商業性|将来性|歴史・文化","text":"事実（80字以内）","src":"出典URL"}],"gakku":{"elem":"○○小学校","junior":"○○中学校","note":"番地で分かれるなどの注意（なければ空）","src":"出典URL","confidence":"高/中/低"},"hazards":[{"text":"…","src":"URL"}],"rules":[{"text":"…","src":"URL"}]}`, { modelTier: "research", webSearch: { maxUses: 4, city }, maxTokens: 6000 });
+  const url = u => (/^https:\/\/\S+$/.test(String(u || "").trim()) ? String(u).trim() : "");
+  const str = (v, n) => String(v || "").replace(/\s+/g, " ").trim().slice(0, n);
+  const list = a => (Array.isArray(a) ? a : []).map(x => ({ kind: str(x?.kind, 8), text: str(x?.text, 120), src: url(x?.src) })).filter(x => x.text);
+  const g = o?.gakku && typeof o.gakku === "object" ? { elem: str(o.gakku.elem, 30), junior: str(o.gakku.junior, 30), note: str(o.gakku.note, 80), src: url(o.gakku.src), confidence: str(o.gakku.confidence, 2) } : null;
+  return { area: str(o?.area, 120), facts: list(o?.facts).slice(0, 12), gakku: g && (g.elem || g.junior) ? g : null, hazards: list(o?.hazards).slice(0, 6), rules: list(o?.rules).slice(0, 6), sources: (o?.__sources || []).slice(0, 20), search: o?.__search || null };
+}
+async function researchArea(onMsg) {
+  const R = { at: new Date().toISOString(), geo: null, elev: null, fac: [], counts: {}, web: null, errors: [] };
+  const qs = researchQueries();
+  const mapJob = (async () => {
+    if (!qs.length) { R.errors.push("所在地が入っていないため、地図での周辺調査を省略しました"); return; }
+    onMsg?.("所在地の位置を調べています（国土地理院）");
+    R.geo = await Near.geocode(qs).catch(() => null);
+    if (!R.geo) { R.errors.push("所在地の位置が分かりませんでした（地図サービスにつながらないか、住所を読み取れませんでした）"); return; }
+    onMsg?.("周辺の施設を調べています（OpenStreetMap）");
+    const [fa, el] = await Promise.allSettled([Near.facilities(R.geo), Near.elevation(R.geo)]);
+    if (el.status === "fulfilled") R.elev = el.value;
+    if (fa.status !== "fulfilled") { R.errors.push("周辺の施設を調べられませんでした（地図サービスが混み合っている可能性があります。あとで「周辺を調べ直す」を押してください）"); return; }
+    const all = fa.value; R.total = all.length;
+    for (const c of ["スーパー", "コンビニ", "ドラッグストア", "クリニック", "病院", "公園", "銀行", "郵便局", "幼稚園・保育園"]) R.counts[c] = all.filter(f => f.cat === c && f.straight <= 1000).length;
+    const picked = []; for (const [cat, n] of RS_PICK) picked.push(...all.filter(f => f.cat === cat).slice(0, n));
+    // 1件ずつ道のりを出すときに大事な施設が先になるように並べる
+    const pri = ["駅", "バス停", "スーパー", "コンビニ", "小学校", "中学校", "小中学校", "病院", "公園"];
+    picked.sort((a, b) => ((pri.indexOf(a.cat) + 1 || 99) - (pri.indexOf(b.cat) + 1 || 99)) || a.straight - b.straight);
+    if (picked.length) { onMsg?.("徒歩の道のりを計算しています（OpenStreetMap）"); const w = await Near.walkRoutes(R.geo, picked).catch(() => ({ ok: 0 })); R.routeBy = w.by; if (!w.ok) R.errors.push("徒歩の道のりを計算できなかったため、距離は直線距離です（徒歩分数は載せません）"); }
+    R.fac = picked;
+  })();
+  const webJob = (async () => {
+    if (!(AI.fn && AI.lim?.web)) return;
+    if (!(S.d.addrDisp || S.d.addrReg || S.facts?.address)) return;
+    onMsg?.("ネットで地域の情報を調べています（AIのウェブ検索）");
+    try { R.web = await aiWebResearch(); }
+    catch (e) { R.errors.push(e?.code === "web_search_off" ? "ネット検索がAPIの組織の設定で無効になっています（Anthropicのコンソールの設定で有効にすると使えます）" : `ネット検索ができませんでした（${errMsg(e)}）`); }
+  })();
+  await Promise.all([mapJob, webJob]);
+  return R;
+}
+function researchText(R = S.research) {
+  if (!R) return "（なし）";
+  const L = [];
+  if (R.geo) L.push(`起点：${R.geo.label}（${R.geo.precise ? "番地付近まで特定" : "丁目・字の中心付近のため、距離は目安"}）${R.elev != null ? `／標高 約${R.elev}m（国土地理院）` : ""}`);
+  const byCat = new Map(); for (const f of R.fac || []) { if (!byCat.has(f.cat)) byCat.set(f.cat, []); byCat.get(f.cat).push(f); }
+  for (const [cat, fs] of byCat) L.push(`- ${cat}：${fs.map(f => `${f.name} ${f.road ? `道路距離${f.road}m${f.road <= WALK_MAX ? `（${roadWalk(f.road)}）` : "（徒歩圏外。距離だけ書く）"}` : `直線${f.straight}m（道路距離なし）`}`).join("／")}`);
+  const cnt = Object.entries(R.counts || {}).filter(([, n]) => n).map(([c, n]) => `${c}${n}件`).join("・");
+  if (cnt) L.push(`半径1km以内の施設の数（OpenStreetMapに載っているもの）：${cnt}`);
+  if (R.web) {
+    if (R.web.area) L.push(`エリアの性格（ネット）：${R.web.area}`);
+    for (const f of R.web.facts || []) L.push(`- [${f.kind || "情報"}] ${f.text}${f.src ? `（出典：${f.src}）` : ""}`);
+    if (R.web.gakku) L.push(`学校区（ネット）：${[R.web.gakku.elem, R.web.gakku.junior].filter(Boolean).join("／")}${R.web.gakku.note ? `（${R.web.gakku.note}）` : ""}`);
+  }
+  return L.join("\n") || "（なし）";
+}
+// 交通：交通が空なら最寄りの駅・バス停を入れる。物件レポートの値なら、同じ名前の駅・バス停の徒歩分数を道路距離で計算し直す
+function applyResearchTransport(R) {
+  if (!R?.geo || ["manual", "doc", "web"].includes(S.src.transport)) return 0;
+  const rail = R.fac.filter(f => f.cat === "駅" && f.road).sort((a, b) => a.road - b.road), bus = R.fac.filter(f => f.cat === "バス停" && f.road).sort((a, b) => a.road - b.road);
+  if (!rail.length && !bus.length) return 0;
+  const okinawa = R.geo.lat > 24 && R.geo.lat < 27.5;
+  const lineOf = f => (okinawa ? "沖縄都市モノレール（ゆいレール）" : f.op || "鉄道");
+  const busOp = f => (f.op ? [...new Set(f.op.split(/[;；、,／/]/).map(x => x.trim()).filter(Boolean))].join("・").slice(0, 30) : "路線バス");
+  const note = `徒歩分数は、OpenStreetMapの徒歩ルートの道路距離を80m=1分で計算しました（端数切り上げ）。起点：${R.geo.label}${R.geo.precise ? "" : "（丁目・字の中心付近のため目安）"}。現地で確認してください`;
+  if (S.src.transport === "rep") {
+    let n = 0;
+    for (const r of S.d.transport) { if (!r.stop) continue; const f = [...rail, ...bus].find(x => sameName(x.name, r.stop)); if (f) { r.walk = roadWalk(f.road); n++; } }
+    if (n) { R.trFixed = true; S.notes.transport = `${n}件の徒歩分数を、物件レポートの直線距離ではなく道路距離で計算し直しました。${note}`; if (R.geo.precise) S.unc.delete("transport"); }
+    return n;
+  }
+  if (S.d.transport.some(r => r.stop)) return 0;
+  const row = (f, line, stop) => ({ line, stop, walk: roadWalk(f.road), m: f.road });
+  const rows = [];
+  if (bus[0]) rows.push(row(bus[0], busOp(bus[0]), stopName(bus[0].name)));
+  if (rail[0] && rail[0].road <= 1600) rows.push(row(rail[0], lineOf(rail[0]), stName(rail[0].name)));
+  const ex = [bus[1] && !sameName(bus[1].name, bus[0].name) ? bus[1] : null, rail[1] && rail[1].road <= 1600 ? rail[1] : null].filter(Boolean).sort((a, b) => a.road - b.road)[0];
+  if (ex) rows.push(ex.cat === "駅" ? row(ex, lineOf(ex), stName(ex.name)) : row(ex, busOp(ex), stopName(ex.name)));
+  if (!rows.length) return 0;
+  S.d.transport = rows.sort((a, b) => a.m - b.m).map(({ m, ...r }) => r); S.src.transport = "near";
+  if (R.geo.precise) S.unc.delete("transport"); else S.unc.add("transport");
+  S.notes.transport = note;
+  return rows.length;
+}
+// 学校区：ネットで確かめた通学区域（物件レポート・資料・手入力の値があればそちらを優先）
+function applyResearchGakku(R) {
+  const g = R?.web?.gakku; if (!g || ["manual", "rep", "doc"].includes(S.src.gakku)) return false;
+  const rd = n => (R.fac || []).find(f => /学校/.test(f.cat) && f.road && sameName(f.name, n))?.road;
+  const part = (lab, n) => (n ? `${lab}：${shortSchool(n)}${rd(n) ? `（${roadWalk(rd(n))}）` : ""}` : "");
+  const t = g.elem && g.elem === g.junior ? part("小中学校", g.elem) : [part("小学校", g.elem), part("中学校", g.junior)].filter(Boolean).join("　");
+  if (!t) return false;
+  const official = /\.lg\.jp|[./]city\.|[./]town\.|[./]vill\.|pref\.okinawa|\.ed\.jp|kyoiku|edu/.test(g.src || "");
+  setv("gakku", t, "web", { unc: !(official && g.confidence === "高") || !!g.note, note: `ネット検索で確認${g.src ? `（出典：${g.src}）` : ""}${g.note ? `。注意：${g.note}` : ""}${rd(g.elem) || rd(g.junior) ? "。徒歩分数は道路距離（OpenStreetMap）から80m=1分で計算" : ""}。${SCHOOL_NOTE}` });
+  S.questions.forEach(q => { if (q.key === "gakku" && !S.unc.has("gakku")) q.done = true; });
+  return true;
+}
+function applyResearch(R) {
+  S.research = R; const out = { tr: 0, gakku: false };
+  if (!R) return out;
+  out.tr = applyResearchTransport(R); out.gakku = applyResearchGakku(R);
+  for (const h of [...(R.web?.hazards || []), ...(R.web?.rules || [])]) { const t = `ネット調査（社内確認用）：${h.text}${h.src ? `（${h.src}）` : ""}`; if (!String(S.internal || "").includes(h.text)) S.internal = [S.internal, t].filter(Boolean).join("\n"); }
+  const cited = (R.web?.sources || []).filter(x => x.cited), more = (R.web?.sources || []).filter(x => !x.cited);
+  for (const x of [...cited, ...more].slice(0, 8)) { const line = `${x.title ? x.title + "：" : ""}${x.url}`; if (!S.sources.some(s => s.includes(x.url))) S.sources.push(line); }
+  return out;
+}
+function researchMsg(R, a) {
+  if (!R) return "";
+  const nRoad = (R.fac || []).filter(f => f.road).length;
+  return [R.geo ? `位置：${R.geo.precise ? "番地付近" : "丁目・字の中心"}${R.elev != null ? `・標高約${R.elev}m` : ""}` : "", R.fac?.length ? `周辺の施設${R.fac.length}件（徒歩の道のり${nRoad}件）` : "", a?.tr ? `交通${a.tr}件に反映` : "", a?.gakku ? "学校区をネットで確認" : "", R.web ? `ネットの情報${R.web.facts.length}件（検索${R.web.search?.searches ?? "?"}回）` : "", ...(R.errors || [])].filter(Boolean).join("／");
+}
+
+// アピールポイントの下書き（AIなし・AIが失敗したとき）。手で書き直したポイントはそのまま
+function draftPoints(why) {
+  const pts = S.src.points === "manual" ? [] : rulePoints(); if (!pts.length) return 0;
+  S.d.points = pts; S.src.points = "rule"; S.unc.add("points"); S.notes.points = why;
+  if (S.research) S.research.used = !!S.research.fac?.some(f => f.road);
+  checkNg(); return pts.length;
+}
+// 「周辺を調べ直す」：調べた結果でアピールポイントも作り直す
+async function researchNow() {
+  if (S.busy) return;
+  if (!STANDALONE) { toast(NO_NET, 6000); return; }
+  if (!researchQueries().length) { toast("所在地（住居表示か登記簿上の所在地）を入れてから押してください。", 5000); return; }
+  S.busy = true; $("#btnGen").disabled = true;
+  const b = $("#btnResearch"); if (b) { b.disabled = true; b.textContent = "調べています…"; }
+  window.__AI_CFG?.resetUsage?.();
+  try {
+    const R = await researchArea(m => toast(m, 60000)), a = applyResearch(R);
+    let how = "";
+    if (S.src.points !== "manual") {
+      if (AI.fn) {
+        try { applyCopy(await aiCopy()); how = "アピールポイント・キャッチコピーを作り直しました"; }
+        catch (e) { how = draftPoints(`AIでの作成に失敗したため（${errMsg(e)}）、資料の数字と周辺の調査から作った下書きです。言い回しを整えてください`) ? `AIでの作成に失敗したため（${errMsg(e)}）、下書きを作りました` : `AIでの作成に失敗しました（${errMsg(e)}）`; }
+      } else if (draftPoints("AIを使わずに、資料の数字と地図で調べた周辺の施設から作った下書きです。言い回しを整えてください")) how = "アピールポイントの下書きを作り直しました";
+    } else how = "アピールポイントは手で書き直してあるため、そのままにしました";
+    baseQuestions(); renderForm(); renderPages();
+    const u = window.__AI_CFG?.usage?.();
+    toast(`${researchMsg(R, a) || "調べ終わりました"}${how ? "。" + how : ""}${u?.calls ? `（AI利用料の目安 約${u.yen}円）` : ""}`, 10000);
+  } finally { S.busy = false; $("#btnGen").disabled = false; const b2 = $("#btnResearch"); if (b2) { b2.disabled = false; b2.textContent = "周辺を調べ直す"; } }
+}
+
 /* ---------- 自動作成 ---------- */
 function setStatus(steps) {
   const el = $("#status"); el.classList.add("show");
@@ -5539,8 +6044,9 @@ async function generate() {
   S.busy = true; $("#btnGen").disabled = true;
   const st = [
     { t: "登記簿・用途地域図を読み取り" }, { t: "備考メモ（話した内容）を備考欄に整理" }, { t: "資料の種類と向きを確認（地図・航空写真・書類・販売図面・写真を見分ける）" }, { t: "物件レポートのページを特定" }, { t: "物件レポートの表を読み取り（価格・交通・周辺施設・地価）" },
-    { t: "公図・地図から道路（公道・私道・幅員）・間口・用途地域を読み取り" }, { t: "その他の資料（Word・Excel・書類・他社の販売図面など）を読み取り" }, { t: "写真を5枚選んで並べ替え" }, { t: "アピールポイント・キャッチコピーを作成" }, { t: "レイアウトを組版" }
+    { t: "公図・地図から道路（公道・私道・幅員）・間口・用途地域を読み取り" }, { t: "その他の資料（Word・Excel・書類・他社の販売図面など）を読み取り" }, { t: "写真を5枚選んで並べ替え" }, { t: "周辺環境を調べる（地図で周辺の施設と徒歩の道のり・ネットで地域の情報）" }, { t: "アピールポイント・キャッチコピーを作成" }, { t: "レイアウトを組版" }
   ];
+  window.__AI_CFG?.resetUsage?.();
   const run = i => { st[i].st = "run"; setStatus(st); };
   const ok = i => { st[i].st = "done"; setStatus(st); };
   const ng = (i, msg) => { st[i].st = "err"; st[i].msg = msg; setStatus(st); };
@@ -5603,20 +6109,35 @@ async function generate() {
       } catch (e) { ng(6, errMsg(e)); }
       renderBins(); renderForm(); renderPages();
     }
+    // 8：周辺環境を調べる（地図は無料・APIキー不要。写真選びと同時に進める）
+    let researchP = null;
+    if (!STANDALONE) skip(8, NO_NET);
+    else if ($("#webOn")?.checked !== false) { run(8); researchP = researchArea(m => { st[8].msg = m; setStatus(st); }).catch(e => ({ errors: [`周辺の調査で問題が起きました（${String(e?.message || e)}）`], fac: [] })); }
+    else skip(8, "「周辺環境とネットの情報を調べる」がオフです");
     // 7：写真（他社の資料から取り出した写真も含めて選ぶ）
     if (!img) skip(7, noImg);
     else if (S.photos.length >= 2) { run(7); try { await applyPhotos(await aiPhotos()); ok(7); } catch (e) { ng(7, errMsg(e)); } renderBins(); renderPages(); }
     else skip(7, "写真が2枚未満です");
-    // 8：コピー
-    if (txt) { run(8); try { applyCopy(await aiCopy()); ok(8); } catch (e) { ng(8, errMsg(e)); } }
-    else {
-      const pts = S.src.points === "manual" ? [] : rulePoints();
-      if (pts.length) { S.d.points = pts; S.src.points = "rule"; S.unc.add("points"); S.notes.points = "AIを使わずに、資料の数字から作った下書きです。言い回しを整えてください"; done(8, "AIを使わずに、資料の数字からアピールポイントの下書きを作りました（キャッチコピーは手入力）"); }
-      else skip(8, STANDALONE ? "AIを使うと、キャッチコピー・アピールポイントも作れます" : "この表示ではAIを使えません");
+    if (researchP) {
+      const R = await researchP, a = applyResearch(R), msg = researchMsg(R, a);
+      R.geo || R.web ? done(8, msg) : ng(8, msg || "周辺を調べられませんでした");
+      renderForm(); renderPages();
+    }
+    // 9：コピー（AIが使えないとき・失敗したときは、資料の数字と周辺の調査から下書き）
+    const draft = draftPoints;
+    if (txt) {
+      run(9);
+      try { applyCopy(await aiCopy()); ok(9); }
+      catch (e) { const n = draft(`AIでの作成に失敗したため（${errMsg(e)}）、資料の数字と周辺の調査から下書きを作りました。言い回しを整えてください`); ng(9, `${errMsg(e)}${n ? "（代わりに、資料の数字と周辺の調査からアピールポイントの下書きを作りました）" : ""}`); }
+    } else {
+      const n = draft(`AIを使わずに、資料の数字${S.research?.fac?.length ? "と地図で調べた周辺の施設" : ""}から作った下書きです。言い回しを整えてください`);
+      if (n) done(9, `AIを使わずに、資料の数字${S.research?.fac?.length ? "と周辺の施設" : ""}からアピールポイントの下書きを${n}項目作りました（キャッチコピーは手入力）`);
+      else skip(9, STANDALONE ? "AIを使うと、キャッチコピー・アピールポイントも作れます" : "この表示ではAIを使えません");
     }
     if ($("#memoPrice").value.trim()) setv("price", $("#memoPrice").value.trim(), "manual");
     ensureFloorRemark(); ensureZoneRemark();
-    run(9); baseQuestions(); renderBins(); renderForm(); renderPages(); ok(9);
+    run(10); baseQuestions(); renderBins(); renderForm(); renderPages(); ok(10);
+    const u = window.__AI_CFG?.usage?.(); if (u?.calls) done(10, `今回のAI利用料の目安：約${u.yen}円（AI ${u.calls}回${u.searches ? `・ネット検索${u.searches}回` : ""}。1ドル160円で計算）`);
     const nq = S.questions.filter(q => !q.done).length;
     toast(nq ? `物件資料ができました。確認が必要な項目が${nq}件あります（左の黄色の枠）。` : "物件資料ができました。内容を確認して「PDFで書き出す」へ。", 6000);
   } catch (e) {
@@ -5639,7 +6160,7 @@ function renderBins() {
     ${r.file && r.pages > 1 ? `<input type="text" class="pgsel" data-reg-sel="${r.id}" value="${esc(r.sel || "")}" placeholder="全頁" title="資料に入れるページ（例：1-4,6）。空欄なら全ページ" aria-label="資料に入れるページ">` : ""}
     <button class="ic" data-reg-rot="${r.id}" title="全ページを90°回す（時計回り）" aria-label="90°回す">⟳</button><input type="checkbox" data-reg-inc="${r.id}" ${r.include !== false ? "checked" : ""} aria-label="資料に入れる" title="資料に入れる"><button class="ic" data-del-reg="${r.id}" aria-label="削除">✕</button>${regInfo(r)}${r.rotNote ? `<div class="ri ok">↻ ${esc(r.rotNote)}</div>` : ""}</li>`).join("") + miss;
   const mapLi = S.maps.map((m, i) => `<li><img src="${m.thumb || m.url}" alt=""><span class="nm" title="${esc(m.name)}">${esc(m.name)}</span>
-    <select data-map-label="${m.id}" aria-label="地図の種類">${MAP_LABELS.map(l => `<option ${l === m.label ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <select data-map-label="${m.id}" aria-label="地図の種類">${[...MAP_LABELS, "物件写真"].map(l => `<option value="${l}" ${l === m.label ? "selected" : ""}>${l === "販売図面" ? "販売図面・物件概要書" : l}</option>`).join("")}</select>
     <button class="ic" data-measure="${m.id}" title="この図面で距離を測る">📏</button>
     <button class="ic" data-map-rot="${m.id}" title="90°回す（時計回り）" aria-label="90°回す">⟳</button>
     <input type="checkbox" data-map-inc="${m.id}" ${m.include ? "checked" : ""} aria-label="資料に入れる">${m.aiNote ? `<div class="ri ok">✓ ${esc(m.aiNote)}</div>` : ""}${m.label === "未分類" ? `<div class="ri ng">種類が分かりません。${AI.state === "full" ? "自動作成でAIが画像を見て判定します（手で選ぶこともできます）" : "ここか右の「資料の順番」で種類を選んでください"}</div>` : ""}${m.rotNote ? `<div class="ri ok">↻ ${esc(m.rotNote)}</div>` : ""}${m.moved ? `<div class="ri ng">登記簿として読み取れなかったため、こちらに移しました（資料には未掲載）</div>` : ""}</li>`).join("");
@@ -5650,7 +6171,7 @@ function renderBins() {
     <button class="ic" data-ph-rot="${p.id}" title="90°回す（時計回り）" aria-label="90°回す">⟳</button>
     <input type="checkbox" data-ph-inc="${p.id}" ${p.include ? "checked" : ""} aria-label="資料に入れる">${p.moved ? `<div class="ri ok">✓ ${esc(p.moved)}</div>` : ""}${p.rotNote ? `<div class="ri ok">↻ ${esc(p.rotNote)}</div>` : ""}
     ${p.include ? `<input type="text" class="cap" data-ph-cap="${p.id}" value="${esc(p.caption || "")}" placeholder="写真の説明（例: 外観（南側））" aria-label="写真の説明">` : ""}</li>`).join("");
-  const docLi = S.docs.map(d => `<li><span class="dk" aria-hidden="true">${DOC_ICON[d.kind] || "📄"}</span><span class="nm" title="${esc(d.name)}">${esc(d.name)}</span><em class="note">${DOC_KIND[d.kind] || ""}${d.brochure ? "・販売図面" : ""}</em>
+  const docLi = S.docs.map(d => `<li><span class="dk" aria-hidden="true">${DOC_ICON[d.kind] || "📄"}</span><span class="nm" title="${esc(d.name)}">${esc(d.name)}</span><em class="note">${DOC_KIND[d.kind] || ""}${d.sheet || d.brochure ? "・物件概要書（添付しない）" : ""}</em>
     <input type="checkbox" data-doc-inc="${d.id}" ${d.include !== false ? "checked" : ""} title="読み取りに使う" aria-label="読み取りに使う"><button class="ic" data-doc-del="${d.id}" aria-label="削除" title="一覧から外す">✕</button>
     ${d.res ? `<div class="ri ${d.res.err ? "ng" : d.res.ok ? "ok" : ""}">${d.res.err ? "⚠ " : ""}${esc(d.res.msg)}</div>` : `<div class="ri">${d.include === false ? "読み取りに使いません" : "「物件資料を自動作成」か「資料を読み取る」で、AIが読んで反映します"}</div>`}</li>`).join("");
   const docWait = S.docs.some(d => d.include !== false && !d.res?.ok && !d.res?.final) || S.maps.some(m => !m.docId && ["書類", "販売図面"].includes(normLabel(m.label)));
@@ -5663,7 +6184,7 @@ function renderBins() {
 }
 
 /* ---------- 左パネル：確認フォーム ---------- */
-const CHIP = { reg: '<span class="chip">登記簿</span>', map: '<span class="chip">用途地域図</span>', rep: '<span class="chip ai">レポート</span>', ai: '<span class="chip ai">AI</span>', web: '<span class="chip web">ネット</span>', doc: '<span class="chip doc">資料</span>', memo: '<span class="chip">備考メモ</span>' };
+const CHIP = { reg: '<span class="chip">登記簿</span>', map: '<span class="chip">用途地域図</span>', rep: '<span class="chip ai">レポート</span>', ai: '<span class="chip ai">AI</span>', web: '<span class="chip web">ネット</span>', near: '<span class="chip web">地図調査</span>', rule: '<span class="chip">下書き</span>', doc: '<span class="chip doc">資料</span>', memo: '<span class="chip">備考メモ</span>' };
 const F = (k, label, opt = {}) => {
   const v = S.d[k] ?? ""; const unc = S.unc.has(k);
   const ctl = opt.area ? `<textarea class="in" id="f-${k}" data-k="${k}" rows="${opt.rows || 3}">${esc(v)}</textarea>` : `<input class="in" id="f-${k}" data-k="${k}" value="${esc(v)}" ${opt.ph ? `placeholder="${esc(opt.ph)}"` : ""}>`;
@@ -5689,6 +6210,22 @@ function factsHTML(f) {
     ${(f.hazards || []).length ? `<p><b>ハザード（資料には載せません）</b><br>${f.hazards.map(esc).join("<br>")}</p>` : ""}
   </div></details>`;
 }
+function researchHTML() {
+  const R = S.research, web = AI.fn && AI.lim?.web;
+  if (!STANDALONE) return "";
+  const btn = `<button class="btn sm" type="button" id="btnResearch" style="margin-top:8px">${R ? "周辺を調べ直す" : "周辺環境を調べる"}</button>`;
+  if (!R) return `<details class="sec"><summary>周辺環境の調査（地図${web ? "・ネット" : ""}）</summary><div class="body"><p class="note" style="margin:6px 0">自動作成のときに、所在地から周辺の施設・徒歩の道のり・標高を地図で調べ${web ? "、ネット検索で地域の特徴・開発・学校区も調べ" : ""}て、アピールポイントの材料にします。所在地を直したときは、ここから調べ直せます。</p>${btn}</div></details>`;
+  const rows = (R.fac || []).map(f => `<tr><th>${esc(f.cat)}</th><td>${esc(f.name)}</td><td class="n">${f.road ? `${f.road.toLocaleString("ja-JP")}m` : `直線${f.straight.toLocaleString("ja-JP")}m`}</td><td class="n">${f.road && f.road <= WALK_MAX ? roadWalk(f.road) : ""}</td></tr>`).join("");
+  const link = u => (/^https:\/\//.test(u || "") ? ` <a href="${esc(u)}" target="_blank" rel="noopener">出典</a>` : "");
+  const wb = R.web ? `<b>ネットで調べた情報</b>${R.web.area ? `<p>${esc(R.web.area)}</p>` : ""}${R.web.facts.length ? `<ul class="rs-web">${R.web.facts.map(f => `<li>［${esc(f.kind || "情報")}］${esc(f.text)}${link(f.src)}</li>`).join("")}</ul>` : ""}` : "";
+  return `<details class="sec" ${R.errors?.length && !R.fac?.length ? "open" : ""}><summary>周辺環境の調査結果（地図${R.web ? "・ネット" : ""}）</summary><div class="body facts">
+    ${R.geo ? `<p>起点：${esc(R.geo.label)}（${R.geo.precise ? "番地付近" : "丁目・字の中心付近のため距離は目安"}・${esc(R.geo.by)}）${R.elev != null ? `／標高 約${R.elev}m` : ""}</p>` : ""}
+    ${rows ? `<table><tr><th>種類</th><th>施設</th><th>距離</th><th>徒歩</th></tr>${rows}</table>` : ""}
+    ${wb}
+    ${R.errors?.length ? `<p class="note" style="color:var(--warn)">${R.errors.map(esc).join("<br>")}</p>` : ""}
+    <p class="note">距離は物件から施設までの徒歩ルートの道路距離、徒歩分数は80m=1分（端数切り上げ）です。施設は地図データに登録されているものだけのため、漏れや古い情報があります。地図データ © OpenStreetMap contributors／位置・標高：国土地理院</p>
+    ${btn}</div></details>`;
+}
 function renderForm() {
   const d = S.d;
   const tr = d.transport.map((r, i) => `<div class="grid3 fld ${S.unc.has("transport") ? "unc" : ""}">
@@ -5698,7 +6235,7 @@ function renderForm() {
   const pts = d.points.map((p, i) => `<div class="fld ${S.unc.has("points") ? "unc" : ""}" style="display:grid;grid-template-columns:86px 1fr auto;gap:6px;align-items:start;margin-top:6px">
     <select class="in" data-pt="${i}.label" aria-label="見出し${i + 1}">${[...new Set([...PT_LABELS, p.label])].map(l => `<option ${l === p.label ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
     <textarea class="in" data-pt="${i}.text" rows="2" aria-label="アピールポイント${i + 1}">${esc(p.text)}</textarea>
-    <button class="ic" data-pt-del="${i}" aria-label="削除">✕</button></div>`).join("");
+    <button class="ic" data-pt-del="${i}" aria-label="削除">✕</button>${p.basis ? `<div class="hint" style="grid-column:2/3;margin-top:-2px">根拠：${esc(p.basis)}</div>` : ""}</div>`).join("");
   const bl = d.buildings.map((b, i) => `<div class="${b.unc ? "fld unc" : "fld"}" style="border-top:1px solid var(--line);margin-top:8px;padding-top:2px">
     <div class="grid2"><div><label class="f" for="b${i}n">${CIRC[i]} 家屋番号</label><input class="in" id="b${i}n" data-bl="${i}.no" value="${esc(b.no)}"></div>
     <div><label class="f" for="b${i}k">種類</label><input class="in" id="b${i}k" data-bl="${i}.kind" value="${esc(b.kind)}"></div></div>
@@ -5729,6 +6266,7 @@ function renderForm() {
     <button class="btn sm" type="button" id="exAdd" style="margin-top:8px" ${(d.extra || []).length >= 12 ? "disabled" : ""}>項目を追加</button></div></details>
   <details class="sec" open><summary>価格・備考・取引条件</summary><div class="body">${F("price", "価格")}${F("remarks", "備考", { area: 1, rows: 5 })}<div class="grid2">${F("torihiki", "取引態様")}${F("kokai", "情報公開")}</div>${F("tanto", "担当（氏名 電話）")}</div></details>
   ${factsHTML(S.facts)}
+  ${researchHTML()}
   ${S.internal ? `<details class="sec"><summary>社内メモ（権利関係・ハザード等。資料には出ません）</summary><div class="body"><div class="intern">${esc(S.internal)}</div></div></details>` : ""}
   <details class="sec"><summary>会社情報・帯（この端末に保存）</summary><div class="body">${C("license", "免許番号")}${C("assoc", "所属団体", { area: 1 })}${C("coName", "会社名")}${C("url", "QRコードのURL")}<div style="margin-top:10px">${Object.keys(S.co.offices).map(officeForm).join("")}</div></div></details>`;
   renderQuestions(); fillStaff();
@@ -5769,6 +6307,13 @@ function fillStaff() {
 }
 
 /* ---------- 印刷シート ---------- */
+// 地図で調べた道路距離を交通・アピールポイントに使ったときの注記（徒歩分数の算出方法と、地図データの出典表示）
+function osmNote(ptsShown) {
+  const R = S.research; if (!R) return "";
+  const usedPts = ptsShown && R.used && S.src.points !== "manual", usedTr = S.src.transport === "near" || R.trFixed;
+  if (!usedPts && !usedTr) return "";
+  return `<div class="ptnote">※徒歩分数は道路距離80mを1分として算出（端数切り上げ）。距離は地図データ（© OpenStreetMap contributors）による</div>`;
+}
 const U = (k, html) => `<span class="${S.unc.has(k) ? "unc" : ""}">${html}</span>`;
 const V = k => U(k, esc(S.d[k] || ""));
 function sheet1() {
@@ -5790,7 +6335,7 @@ function sheet1() {
   const qr = qrData(co.url);
   const pts = $("#tgPts").checked && d.points.length ? `<div class="pts">${d.points.map(p => `<div class="pt"><b>${esc(p.label)}</b><span>${U("points", esc(p.text))}</span></div>`).join("")}</div>` : "";
   return `<div class="sheet s1" id="sheet1">
-  <div class="catch"><div class="t">${V("title")}</div><div class="l">${V("catch1")}</div><div class="l">${V("catch2")}</div>${pts}</div>
+  <div class="catch"><div class="t">${V("title")}</div><div class="l">${V("catch1")}</div><div class="l">${V("catch2")}</div>${pts}${osmNote(!!pts)}</div>
   <div class="s-title">【物件概要書】</div>
   <table class="gai">
     <colgroup><col style="width:76px"><col style="width:92px"><col><col><col style="width:92px"><col></colgroup>
@@ -5944,7 +6489,7 @@ function renderOrder() {
   let n = 2;
   const row = (x, i, len) => {
     const c = x.on ? cnt(x) : 0, no = !x.on ? "—" : c > 1 ? `${n}〜${n + c - 1}` : String(n); if (x.on) n += c;
-    const th = attThumb(x), type = x.m ? `<select data-ord-type="${x.m.id}" aria-label="資料の種類">${MAP_LABELS.map(l => `<option ${l === normLabel(x.m.label) ? "selected" : ""}>${l}</option>`).join("")}</select>` : `<span class="kind">${x.ph ? "写真" : "登記簿"}</span>`;
+    const th = attThumb(x), type = x.m ? `<select data-ord-type="${x.m.id}" aria-label="資料の種類">${MAP_LABELS.map(l => `<option value="${l}" ${l === normLabel(x.m.label) ? "selected" : ""}>${l === "販売図面" ? "販売図面・物件概要書" : l}</option>`).join("")}</select>` : `<span class="kind">${x.ph ? "写真" : "登記簿"}</span>`;
     return `<li class="${x.on ? "" : "off"}" ${x.on ? `draggable="true"` : ""} data-key="${x.key}">
       <span class="grip" aria-hidden="true">${x.on ? "⋮⋮" : ""}</span><span class="no">${no}</span>
       ${th ? `<img src="${th}" alt="">` : '<span class="ph0">📄</span>'}<span class="tt" title="${esc(attTitle(x))}">${esc(attTitle(x))}</span>${type}
@@ -5965,7 +6510,7 @@ function moveKey(key, delta) {
 }
 function setOn(key, on) {
   if (key === "ph") { if (on) { if ($("#tgPhoto").value === "0") $("#tgPhoto").value = "5"; if (!S.photos.some(p => p.include)) S.photos.slice(0, 5).forEach(p => (p.include = true)); } else $("#tgPhoto").value = "0"; }
-  else if (key[0] === "m") { const m = S.maps.find(x => x.id === +key.slice(1)); if (m) m.include = on; }
+  else if (key[0] === "m") { const m = S.maps.find(x => x.id === +key.slice(1)); if (m) { m.include = on; m.incManual = true; m.autoInc = false; } }
   else { const r = S.reg.find(x => x.id === +key.slice(1)); if (r) r.include = on; }
   renderBins(); renderPages();
 }
@@ -6280,7 +6825,7 @@ async function loadSample() {
     gakku: "物件レポート「教育施設の情報」の学区の指定学校（直線距離 若狭小学校 713m・那覇中学校 453m。徒歩分数は直線距離×1.3を道路距離の目安とし80m=1分で計算）。那覇市の町字別索引（前島3丁目＝若狭小・那覇中）とも一致。" + SCHOOL_NOTE, areaKobo: "24番3 297.24㎡／24番4 182.21㎡／24番5 121.65㎡／24番7 72.65㎡／101番3 80.67㎡",
     points: "物件レポートとネット調査（出典は下）から作成"
   };
-  S.facts = structuredClone(SAMPLE_FACTS); S.internal = SAMPLE_INTERNAL; S.sources = SAMPLE_SOURCES.slice();
+  S.facts = structuredClone(SAMPLE_FACTS); S.internal = SAMPLE_INTERNAL; S.sources = SAMPLE_SOURCES.slice(); S.research = null;
   S.questions = [
     { key: "price", q: "価格は「7億7,594万円」（物件レポートの売買想定価格）で掲載しますか？", options: ["このまま掲載", "ご相談"] },
     { key: "bouka", q: "物件の位置の防火指定を確認してください（都市計画図の中心点は「指定なし」、元の資料は「防火地域」）", options: ["防火地域", "準防火地域", "指定なし"] },
@@ -6310,7 +6855,7 @@ async function loadSample() {
 }
 function resetAll(silent) {
   const keepTanto = (S.sample && myTanto()) || $("#memoTanto").value.trim(); // 見本からなら、この端末の担当者を使う
-  S.sample = false; S.d = EMPTY(); S.unc = new Set(); S.src = {}; S.notes = {}; S.questions = []; S.facts = null; S.site = null; S.sources = []; S.internal = "";
+  S.sample = false; S.d = EMPTY(); S.unc = new Set(); S.src = {}; S.notes = {}; S.questions = []; S.facts = null; S.site = null; S.sources = []; S.internal = ""; S.research = null;
   S.reg = []; S.report = null; S.maps = []; S.photos = []; S.docs = []; S.docRank = {}; S.missingBlds = []; S.order = null; S.zoneCands = [];
   for (const u of _dt.values()) if (u && u !== "…") URL.revokeObjectURL(u); _dt.clear();
   $("#memo").value = ""; $("#memoPrice").value = ""; $("#status").classList.remove("show"); $("#sampleBanner").style.display = "none";
@@ -6323,15 +6868,21 @@ async function recopy() {
   const b = $("#btnRecopy"); if (!AI.fn || !b) return; b.disabled = true; b.textContent = "作成中…";
   try {
     const d = S.d;
-    const o = await AI.fn.json(`沖縄の不動産会社の販売図面（物件概要書）冒頭に載せるキャッチコピーとアピールポイントの別案を作ってください。事実だけを使い、不動産広告で根拠なく使えない言葉（最高・抜群・絶対・格安など）は使わない。
+    const o = await AI.fn.json(`沖縄県の不動産会社「株式会社大央ハウジング」の販売図面（物件概要書）冒頭に載せるキャッチコピーとアピールポイントの別案を作ってください。現在の案とは違う切り口で、物件の魅力をしっかり打ち出してください。
 ■物件
 ${propertySummary()}
 ■物件レポートの読み取り
 ${S.facts ? JSON.stringify(S.facts).slice(0, 6000) : "（なし）"}
+■公図・地図の読み取り（道路・間口・敷地の形・角地）
+${S.site ? JSON.stringify(S.site).slice(0, 3000) : "（なし）"}
+■周辺環境の調査（地図：OpenStreetMap・国土地理院。距離は徒歩ルートの道路距離、徒歩分数は80m=1分・端数切り上げ）とネット検索の結果
+${researchText()}
 ■現在の案
 ${d.title} / ${d.catch1} / ${d.catch2}
 ${d.points.map(p => `・${p.label}：${p.text}`).join("\n")}
-JSONだけ: {"title":"【…】（28字以内）","catch1":"（50字以内）","catch2":"（55字以内）","points":[{"label":"${PT_LABELS.join("|")}のいずれか","text":"60字以内"}]}`, { modelTier: tier(), cache: false });
+
+${copyRules()}
+JSONだけ: {"title":"…","catch1":"…","catch2":"…","points":[{"label":"交通","text":"…","basis":"…"}]}`, { modelTier: tier(), cache: false });
     applyCopy({ title: o?.title, catch1: o?.catch1, catch2: o?.catch2, points: o?.points });
     renderForm(); renderPages();
   } catch (e) { toast(errMsg(e)); }
@@ -6398,6 +6949,7 @@ $("#orderList").addEventListener("change", e => {
   const t = e.target; if (!t.dataset.ordType) return;
   const m = S.maps.find(x => x.id === +t.dataset.ordType); if (!m) return;
   m.label = t.value; m.labelSrc = "manual"; m.auto = false; m.aiNote = ""; if (!isDocLabel(t.value)) m.title = "";
+  if (t.value === "販売図面") unattach(m, SHEET_NOTE);
   renderBins(); renderPages();
 });
 $("#orderReset").addEventListener("click", () => { S.order = null; renderBins(); renderPages(); toast("標準の順番に戻しました。"); });
@@ -6462,10 +7014,23 @@ $("#bins").addEventListener("click", async e => {
 });
 $("#bins").addEventListener("change", e => {
   const t = e.target;
-  if (t.dataset.mapLabel) { const m = S.maps.find(m => m.id === +t.dataset.mapLabel); m.label = t.value; m.auto = false; m.labelSrc = "manual"; m.aiNote = ""; if (!isDocLabel(t.value)) m.title = ""; renderBins(); }
+  if (t.dataset.mapLabel) {
+    const m = S.maps.find(m => m.id === +t.dataset.mapLabel);
+    if (m && t.value === "物件写真") { // 写真の欄へ移す
+      S.maps = S.maps.filter(y => y !== m);
+      const p = { id: m.id, name: m.name, url: m.url, w: m.w, h: m.h, thumb: m.thumb, include: S.photos.filter(p => p.include).length < 5, caption: "", rot: m.rot, rotSrc: m.rotSrc, rotNote: m.rotNote, checked: true, moved: "地図・図面の欄から写真に移しました" };
+      S.photos.push(p); queueEnhance(p);
+    } else if (m) {
+      m.label = t.value; m.auto = false; m.labelSrc = "manual"; m.aiNote = ""; if (!isDocLabel(t.value)) m.title = "";
+      if (t.value === "販売図面") unattach(m, SHEET_NOTE);
+      else if (m.autoInc && !m.incManual && MAPISH.includes(t.value)) m.include = true;
+      m.autoInc = false;
+    }
+    renderBins();
+  }
   if (t.dataset.regInc) { const r = S.reg.find(r => r.id === +t.dataset.regInc); if (r) r.include = t.checked; }
   if (t.dataset.regSel) { const r = S.reg.find(r => r.id === +t.dataset.regSel); if (r) { r.sel = t.value.trim(); if (!selOk(r.sel)) toast("ページの指定を読み取れなかったため、全ページを入れます（例：1-4,6）。", 4500); } }
-  if (t.dataset.mapInc) S.maps.find(m => m.id === +t.dataset.mapInc).include = t.checked;
+  if (t.dataset.mapInc) { const m = S.maps.find(m => m.id === +t.dataset.mapInc); if (m) { m.include = t.checked; m.incManual = true; m.autoInc = false; } }
   if (t.dataset.docInc) { const d = S.docs.find(x => x.id === +t.dataset.docInc); if (d) { d.include = t.checked; renderBins(); } return; }
   if (t.dataset.phInc) { S.photos.find(p => p.id === +t.dataset.phInc).include = t.checked; renderBins(); }
   renderPages();
@@ -6485,7 +7050,7 @@ $("#form").addEventListener("input", e => {
   if (t.dataset.k) { S.d[t.dataset.k] = t.value; S.src[t.dataset.k] = "manual"; S.unc.delete(t.dataset.k); t.closest(".fld")?.classList.remove("unc"); if (t.dataset.k === "tanto") { $("#memoTanto").value = t.value; rememberTanto(t.value); } }
   else if (t.dataset.tr) { const [i, f] = t.dataset.tr.split("."); S.d.transport[i][f] = t.value; S.unc.delete("transport"); }
   else if (t.dataset.bl) { const [i, f] = t.dataset.bl.split("."); S.d.buildings[i][f] = t.value; S.d.buildings[i].unc = false; S.src.buildings = "manual"; }
-  else if (t.dataset.pt) { const [i, f] = t.dataset.pt.split("."); S.d.points[i][f] = t.value; S.unc.delete("points"); }
+  else if (t.dataset.pt) { const [i, f] = t.dataset.pt.split("."); S.d.points[i][f] = t.value; S.unc.delete("points"); S.src.points = "manual"; }
   else if (t.dataset.ex) { const [i, f] = t.dataset.ex.split("."), x = S.d.extra[+i]; if (x) { x[f] = t.value; x.src = "manual"; x.unc = false; t.closest(".fld")?.classList.remove("unc"); } }
   else if (t.dataset.co) { S.co[t.dataset.co] = t.value; saveCo(); }
   else if (t.dataset.of) { const [o, f] = t.dataset.of.split("."); S.co.offices[o][f] = t.value; saveCo(); if (f === "staff") fillStaff(); }
@@ -6502,6 +7067,7 @@ $("#form").addEventListener("click", e => {
   else if (t.dataset.exDel != null) S.d.extra.splice(+t.dataset.exDel, 1);
   else if (t.dataset.ptDel != null) S.d.points.splice(+t.dataset.ptDel, 1);
   else if (t.id === "btnRecopy") { recopy(); return; }
+  else if (t.id === "btnResearch") { researchNow(); return; }
   else if (t.id === "btnMeasure") { openMeasure(); return; }
   else return;
   renderForm(); renderPages();
