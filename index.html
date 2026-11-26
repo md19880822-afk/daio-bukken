@@ -350,31 +350,6 @@ table.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:ce
           <button class="btn sm" id="btnImport" type="button" style="margin-top:6px">回答を取り込む</button>
         </div>
       </details>
-      <details class="sec" id="aiSet" hidden>
-        <summary>AIの設定（パソコン版）</summary>
-        <div class="body">
-          <p class="note" style="margin:6px 0 8px">パソコン版でAI（物件レポート・公図・地図の読み取り、資料の判別、アピールポイントの作成など）を使うには、Anthropic社のAPIキーが必要です。利用料は使った分だけAnthropic社から請求されます。キーはこのパソコンのブラウザの中にだけ保存され、AIに読み取りを頼むときだけAnthropic社へ送られます。共用のパソコンでは、使い終わったら「キーを消す」を押してください。</p>
-          <div id="aiKeyState">APIキー：未設定</div>
-          <label class="f" for="aiKey">APIキー</label><input class="in" id="aiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
-          <label class="f" for="aiModel">AIのモデル</label>
-          <select class="in" id="aiModel">
-            <option value="">おすすめ（通常は Sonnet、高精度モードは Opus）</option>
-            <option value="claude-sonnet-5-5">Claude Sonnet 5.5（標準）</option>
-            <option value="claude-opus-5-5">Claude Opus 5.5（最も正確・料金は高め）</option>
-            <option value="claude-haiku-5-5">Claude Haiku 5.5（速い・安い・精度はやや下がる）</option>
-          </select>
-          <div class="row"><button class="btn sm primary" id="aiSave" type="button">保存してAIを使う</button><button class="btn sm" id="aiClear" type="button">キーを消す</button></div>
-          <p class="note" style="margin-top:8px">APIキーは Anthropic のコンソール（platform.claude.com）で発行できます。</p>
-          <div id="coDist" hidden>
-            <h3 class="dist-h">社員に配るリンク・ファイル（AI付き）</h3>
-            <p class="note" style="margin:4px 0 8px"><b>社員用リンク</b>：開くだけで、claude.ai のアカウントもAPIキーの入力もなしにAIまで使えるWeb版のリンクです（スマホでも使えます）。<b>社員用ファイル</b>：同じことができる「物件資料メーカー_社内用.html」です（店舗・担当者の一覧も入ります）。<b>どちらも社外の人には渡さないでください</b>。リンクやファイルの中のキーは読みにくくしてありますが、完全には隠せません。漏れたときは、Anthropicのコンソールでキーを無効にして作り直してください。</p>
-            <label class="f" for="coKey">社員用のAPIキー <span class="note">（空欄ならこのパソコンのキー。社員用に別のキーを発行するのがおすすめ）</span></label>
-            <input class="in" id="coKey" type="password" autocomplete="off" spellcheck="false" placeholder="空欄ならこのパソコンのキーを使います">
-            <div class="row"><button class="btn sm primary" id="coLink" type="button">社員用のリンクを作る</button><button class="btn sm" id="coMake" type="button">社員用のファイルを作る</button></div>
-            <div class="linkbox" id="coLinkBox" hidden><input class="in" id="coLinkOut" readonly aria-label="社員用リンク"><button class="btn sm" id="coLinkCopy" type="button">コピー</button></div>
-          </div>
-        </div>
-      </details>
     </section>
     <section class="step">
       <h2><span class="n">3</span>内容の確認・修正</h2>
@@ -462,149 +437,19 @@ table.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:ce
 <div class="toast" id="toast" role="status"></div>
 <div id="printArea" aria-hidden="true"></div>
 <script data-app="standalone">/* standalone.js */
-/* パソコン版（1つのHTMLファイル）用のつなぎ。
-   claude.ai の中では claude.use(...) が用意されているが、ファイルとして開くとそれがないため、
-   ・AI      … Anthropic API（利用者が入力したAPIキー）
+/* パソコン版・Web版（1つのHTMLファイル）用のつなぎ。料金のかからない無料版。
+   claude.ai の中では claude.use(...) が用意されているが、ファイルやWebで開くとそれがないため、
    ・保存    … 通常のダウンロード
    ・音声入力 … ブラウザの音声認識（Chrome・Edge）
-   で同じ形の機能を用意する。 */
+   を同じ形で用意する。AI（有料のAPI）は使わない。 */
 (() => {
   "use strict";
   window.__STANDALONE = true;
-
-  const STORE = "daio-bukken-ai-v1";
-  const API = "https://api.anthropic.com/v1/messages";
-  const MODEL = { default: "claude-sonnet-5-5", complex: "claude-opus-5-5" };
   const err = (code, message) => Object.assign(new Error(message || code), { code });
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  // 社内用ファイル：管理者が入れたAPIキー（読みにくくしたもの）と会社の設定が window.__COMPANY に入っている
-  const MASK = "daio-housing-bukken-shiryou";
-  const xor = s => [...s].map((c, i) => String.fromCharCode(c.charCodeAt(0) ^ MASK.charCodeAt(i % MASK.length))).join("");
-  const enc = s => btoa(xor(String(s))), dec = s => xor(atob(String(s)));
-  // Web版：社員用リンク（…#k=キー）で開いたら、キーをこの端末のブラウザに覚えて、アドレス欄からは消す
-  const HOSTED = /^https?:$/.test(location.protocol), LINK_STORE = "daio-bukken-link-v1";
-  try {
-    const h = new URLSearchParams(location.hash.replace(/^#/, ""));
-    if (h.get("k")) {
-      dec(h.get("k")); // 壊れたリンクなら覚えない
-      localStorage.setItem(LINK_STORE, JSON.stringify({ k: h.get("k"), m: h.get("m") || "", at: new Date().toISOString() }));
-      history.replaceState(null, "", location.pathname + location.search);
-    }
-  } catch { /* 読めないリンク */ }
-  const LINK = (() => { try { const v = JSON.parse(localStorage.getItem(LINK_STORE) || "null"); return v && v.k ? v : null; } catch { return null; } })();
-  const COMPANY = (() => {
-    const c = window.__COMPANY || (LINK && { k: LINK.k, m: LINK.m, stamp: LINK.at, via: "link" });
-    if (!c || !c.k) return null;
-    try { return { key: dec(c.k), model: c.m || "", stamp: c.stamp || "", via: c.via || "file" }; } catch { return null; }
-  })();
-
-  const cfg = {
-    get() {
-      if (COMPANY) return { key: COMPANY.key, model: COMPANY.model };
-      try { return JSON.parse(localStorage.getItem(STORE) || "{}") || {}; } catch { return {}; }
-    },
-    set(v) { if (COMPANY) return; try { localStorage.setItem(STORE, JSON.stringify(v || {})); } catch { /* 保存できない環境 */ } },
-    company: COMPANY ? { via: COMPANY.via, made: COMPANY.stamp ? new Date(COMPANY.stamp).toLocaleString("ja-JP", { dateStyle: "medium", timeStyle: "short" }) : "" } : null,
-    hosted: HOSTED,
-    makeLink: (key, model, base) => `${base}#k=${encodeURIComponent(enc(key))}${model ? "&m=" + encodeURIComponent(model) : ""}`,
-    forgetLink: () => { try { localStorage.removeItem(LINK_STORE); } catch { /* なし */ } }
-  };
-
-  /* ---------- AI（Anthropic API） ---------- */
-  const blobToB64 = b => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = () => rej(r.error); r.readAsDataURL(b); });
-  async function toJpeg(blob) {
-    const url = URL.createObjectURL(blob);
-    try {
-      const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
-      const c = document.createElement("canvas"); c.width = im.naturalWidth; c.height = im.naturalHeight;
-      const x = c.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0, 0, c.width, c.height); x.drawImage(im, 0, 0);
-      return await new Promise(r => c.toBlob(r, "image/jpeg", 0.9));
-    } finally { URL.revokeObjectURL(url); }
-  }
-  async function imagePart(x) {
-    let b = x;
-    if (typeof x === "string") b = await (await fetch(x)).blob();
-    if (!(b instanceof Blob)) throw err("image_rejected");
-    if (!/^image\/(jpeg|png|gif|webp)$/.test(b.type)) b = await toJpeg(b);
-    return { type: "image", source: { type: "base64", media_type: b.type, data: await blobToB64(b) } };
-  }
-  function parseJSON(text) {
-    let s = String(text || "").trim();
-    const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i); if (fence) s = fence[1].trim();
-    try { return JSON.parse(s); } catch { /* 前後に文があるとき */ }
-    const i = s.search(/[{[]/); if (i < 0) throw err("invalid_json");
-    const j = s.lastIndexOf(s[i] === "{" ? "}" : "]");
-    if (j > i) { try { return JSON.parse(s.slice(i, j + 1)); } catch { /* 続けて失敗扱い */ } }
-    throw err("invalid_json");
-  }
-  async function post(key, body, signal) {
-    let r = null;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      try {
-        r = await fetch(API, {
-          method: "POST", signal,
-          headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-          body: JSON.stringify(body)
-        });
-      } catch (e) {
-        if (e && e.name === "AbortError") throw err("cancelled");
-        if (attempt === 3) throw err("network", String(e && e.message || e));
-        await sleep(1500 * (attempt + 1)); continue;
-      }
-      if ((r.status === 429 || r.status === 529 || r.status >= 500) && attempt < 3) {
-        const ra = Number(r.headers.get("retry-after")); await sleep(ra > 0 && ra < 60 ? ra * 1000 : 2500 * (attempt + 1)); continue;
-      }
-      break;
-    }
-    if (!r.ok) {
-      let j = null; try { j = await r.json(); } catch { /* 本文なし */ }
-      const msg = (j && j.error && j.error.message) || "", type = (j && j.error && j.error.type) || "";
-      if (r.status === 401 || type === "authentication_error") throw err("bad_key", msg);
-      if (r.status === 403 || type === "permission_error") throw err(/credit|billing|balance/i.test(msg) ? "no_credit" : "bad_key", msg);
-      if (/credit balance|billing/i.test(msg)) throw err("no_credit", msg);
-      if (r.status === 429 || r.status === 529 || type === "rate_limit_error" || type === "overloaded_error") throw err("rate_limited", msg);
-      if (r.status === 413 || /prompt is too long|too large|request_too_large/i.test(msg + type)) throw err("prompt_too_large", msg);
-      if (r.status === 404 || type === "not_found_error" || /model/i.test(msg) && r.status === 400 && !/image/i.test(msg)) throw err("bad_model", msg);
-      if (/image/i.test(msg)) throw err("image_rejected", msg);
-      throw err("upstream_error", msg || `HTTP ${r.status}`);
-    }
-    return r.json();
-  }
-  async function run(prompt, opts, wantJson) {
-    opts = opts || {};
-    const c = cfg.get(); if (!c.key) throw err("not_granted");
-    const model = c.model || (opts.modelTier === "complex" ? MODEL.complex : MODEL.default);
-    const content = [];
-    for (const im of opts.images || []) content.push(await imagePart(im));
-    content.push({ type: "text", text: String(prompt) });
-    const body = { model, max_tokens: opts.maxTokens || 16000, messages: [{ role: "user", content }] };
-    if (wantJson) body.system = "あなたは日本の不動産会社の資料作成を手伝うアシスタントです。依頼された内容をJSONだけで答えてください。前置き・説明・コードブロックの記号は付けないでください。";
-    const j = await post(c.key, body, opts.signal);
-    if (j.stop_reason === "refusal") throw err("refused");
-    const text = (j.content || []).filter(b => b && b.type === "text").map(b => b.text).join("");
-    return wantJson ? parseJSON(text) : text;
-  }
-  const sample = {
-    json: (prompt, opts) => run(prompt, opts, true),
-    text: (prompt, opts) => run(prompt, opts, false),
-    limits: async () => ({ images: { maxCount: 20 }, text: true })
-  };
-  // 設定画面の「保存してAIを使う」：ごく短い問い合わせでキーとモデルを確かめる
-  cfg.test = async (key, model) => {
-    try { await post(key, { model: model || MODEL.default, max_tokens: 1, messages: [{ role: "user", content: "OK" }] }); return { ok: true }; }
-    catch (e) { return { ok: false, code: e.code || "upstream_error", message: e.message }; }
-  };
-  // 社員に配るファイル（AI付き）を作る：このファイルの中身（画面の元のHTMLとスクリプト）に、キーと会社の設定を足して書き出す
-  cfg.exportCompany = ({ key, model, co }) => {
-    const shell = window.__SHELL; if (!shell || shell.indexOf("@@APP_SCRIPTS@@") < 0) throw new Error("このファイルからは作れません");
-    const data = { v: 1, k: enc(key), m: model || "", stamp: new Date().toISOString(), co: co || null };
-    const tag = `<script data-app="company">window.__COMPANY=${JSON.stringify(data).replace(/</g, "\\u003c")};<\/script>`;
-    const scripts = [...document.querySelectorAll("script[data-app]")].filter(s => s.getAttribute("data-app") !== "company").map(s => s.outerHTML).join("\n");
-    const html = shell.replace("@@APP_SCRIPTS@@", () => tag + "\n" + scripts);
-    return new Blob([html], { type: "text/html;charset=utf-8" });
-  };
-  window.__AI_CFG = cfg;
+  // 以前の版で保存したAPIキー・社員用リンクのキーは、この端末から消す（料金が発生しないように）
+  try { ["daio-bukken-ai-v1", "daio-bukken-link-v1"].forEach(k => localStorage.removeItem(k)); } catch { /* 保存できない環境 */ }
+  try { if (/(^|[#&])k=/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search); } catch { /* なし */ }
 
   /* ---------- 保存（通常のダウンロード） ---------- */
   const downloads = {
@@ -631,7 +476,7 @@ table.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:ce
       rec.onstart = () => { if (state !== "listening") set("listening"); if (resolve) { resolve(); resolve = null; } };
       rec.onresult = ev => {
         let interim = "";
-        for (let i = ev.resultIndex; i < ev.results.length; i++) { const r = ev.results[i]; if (r.isFinal) { emit("final", { text: r[0].transcript }); } else interim += r[0].transcript; }
+        for (let i = ev.resultIndex; i < ev.results.length; i++) { const r = ev.results[i]; if (r.isFinal) emit("final", { text: r[0].transcript }); else interim += r[0].transcript; }
         emit("partial", { text: interim });
       };
       rec.onerror = ev => { if (ev.error !== "no-speech" && ev.error !== "aborted") code = MAP[ev.error] || "upstream_error"; };
@@ -643,7 +488,7 @@ table.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:ce
         if (reject && code) { reject(err(code)); reject = null; }
         set("idle", reason);
       };
-      try { rec.start(); } catch (e) { rec = null; want = false; set("idle", "unavailable"); if (reject) reject(err("unavailable")); }
+      try { rec.start(); } catch { rec = null; want = false; set("idle", "unavailable"); if (reject) reject(err("unavailable")); }
     }
     return {
       onState: f => { on.state.push(f); }, onPartial: f => { on.partial.push(f); }, onFinal: f => { on.final.push(f); },
@@ -660,16 +505,15 @@ table.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:ce
 
   window.claude = {
     async use(cap) {
-      if (cap === "sample") { if (!cfg.get().key) throw err("not_granted"); return sample; }
       if (cap === "downloads") return downloads;
       if (cap === "dictation") { const d = makeDictation(); if (!d) throw err("unavailable"); return d; }
-      throw err("unavailable");
+      throw err("not_granted"); // AI（sample）は使わない
     }
   };
 })();
 
 </script>
-<script data-app="shell">window.__SHELL="\u003c!DOCTYPE html>\n\u003chtml lang=\"ja\">\n\u003chead>\n\u003cmeta charset=\"utf-8\">\n\u003cmeta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\u003cmeta name=\"robots\" content=\"noindex,nofollow\">\n\u003ctitle>大央ハウジング 物件資料メーカー\u003c/title>\n\u003clink rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n\u003clink rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n\u003clink href=\"https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Serif+JP:wght@600;800&display=swap\" rel=\"stylesheet\">\n\u003cstyle>\n/* Layout: left = 資料投入・確認 / right = A4プレビュー（印刷物そのもの） */\n:root{\n  --bg:#eef1f4; --panel:#ffffff; --ink:#1b2430; --muted:#5d6977; --line:#d6dde4;\n  --accent:#1f3a5f; --accent-soft:#e3eaf3; --cta:#e2580e; --cta-ink:#fff;\n  --warn:#b7791f; --warn-soft:#fdf3dd; --ok:#2f7d4f; --ok-soft:#e2f2e8; --bad:#b42318; --bad-soft:#fde8e6;\n  --f-body:\"Noto Sans JP\",\"Hiragino Sans\",\"Yu Gothic\",sans-serif;\n  --f-display:\"Noto Serif JP\",\"Hiragino Mincho ProN\",\"Yu Mincho\",serif;\n  color-scheme:light;\n}\n@media (prefers-color-scheme: dark){\n  :root:not([data-theme=\"light\"]){\n    --bg:#12171d; --panel:#1b222b; --ink:#e7ecf1; --muted:#9aa7b4; --line:#2e3844;\n    --accent:#8db4e2; --accent-soft:#223246; --cta:#f07a35; --cta-ink:#1a0f08;\n    --warn:#e8b45a; --warn-soft:#3a2f1a; --ok:#6fcf97; --ok-soft:#1d3427; --bad:#f19a8f; --bad-soft:#3b1f1c; color-scheme:dark;\n  }\n}\n:root[data-theme=\"dark\"]{\n  --bg:#12171d; --panel:#1b222b; --ink:#e7ecf1; --muted:#9aa7b4; --line:#2e3844;\n  --accent:#8db4e2; --accent-soft:#223246; --cta:#f07a35; --cta-ink:#1a0f08;\n  --warn:#e8b45a; --warn-soft:#3a2f1a; --ok:#6fcf97; --ok-soft:#1d3427; --bad:#f19a8f; --bad-soft:#3b1f1c; color-scheme:dark;\n}\n*{box-sizing:border-box}\nhtml,body{height:100%;margin:0}\nbody{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:14px;line-height:1.55}\nbutton,input,select,textarea{font:inherit;color:inherit}\n:focus-visible{outline:2px solid var(--cta);outline-offset:2px}\na{color:var(--accent)}\n.top{display:flex;align-items:center;gap:14px;padding:10px 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}\n.brand{display:flex;flex-direction:column;line-height:1.25}\n.brand b{font-family:var(--f-display);font-size:18px;letter-spacing:.04em}\n.brand span{font-size:11px;color:var(--muted)}\n.top .sp{flex:1}\n.aichip{font-size:12px;padding:4px 10px;border-radius:12px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}\n.aichip.full{background:var(--ok-soft);color:var(--ok)}\n.aichip.text,.aichip.none{background:var(--bad-soft);color:var(--bad)}\n.btn{border:1px solid var(--line);background:var(--panel);border-radius:6px;padding:8px 14px;cursor:pointer;font-weight:500;white-space:nowrap}\n.btn:hover{border-color:var(--accent)}\n.btn.primary{background:var(--cta);border-color:var(--cta);color:var(--cta-ink);font-weight:700}\n.btn.primary:hover{filter:brightness(1.06)}\n.btn.ghost{background:transparent}\n.btn:disabled{opacity:.5;cursor:not-allowed}\n.btn.sm{padding:4px 9px;font-size:12px}\n.wrap{display:grid;grid-template-columns:minmax(370px,460px) 1fr;min-height:calc(100% - 60px)}\n.side{background:var(--panel);border-right:1px solid var(--line);padding:18px 18px 60px;overflow:auto;max-height:calc(100vh - 60px);position:sticky;top:60px}\n.stage{padding:24px;overflow:auto;min-width:0}\n.step{margin-bottom:22px}\n.step h2{font-size:13px;letter-spacing:.06em;color:var(--accent);margin:0 0 8px;display:flex;align-items:center;gap:8px}\n.step h2 .n{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--accent);color:var(--panel);font-size:11px}\n.drop{border:2px dashed var(--line);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s, background .15s}\n.drop:hover,.drop.over{border-color:var(--cta);background:var(--accent-soft)}\n.drop strong{display:block;font-size:15px}\n.drop small{color:var(--muted)}\n.bin{margin-top:12px;border:1px solid var(--line);border-radius:8px;overflow:hidden}\n.bin-h{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 10px;background:var(--accent-soft);font-size:12px;font-weight:700}\n.bin-h em{font-style:normal;font-weight:500;color:var(--muted)}\n.bin ul{list-style:none;margin:0;padding:0}\n.bin li{display:flex;align-items:center;gap:6px;padding:6px 10px;border-top:1px solid var(--line);font-size:12px;flex-wrap:wrap}\n.bin li .nm{flex:1;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.bin li img{width:44px;height:32px;object-fit:cover;border-radius:3px;border:1px solid var(--line)}\n.bin li select,.bin li input[type=text]{font-size:12px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel)}\n.bin li input.cap{flex-basis:100%;margin-left:50px}\n.bin .empty{padding:8px 10px;color:var(--muted);font-size:12px;border-top:1px solid var(--line)}\n.bin li .ri{flex-basis:100%;font-size:11px;line-height:1.45;padding-left:2px}\n.bin li .pgsel{width:58px;padding:2px 5px;font-size:11px;border:1px solid var(--line);border-radius:4px}\n.sheet .wavg{font-size:.86em;font-weight:500;color:#333}\n.sheet.docp{display:flex;align-items:center;justify-content:center;padding:22px;background:#fff}\n.sheet.docp img{max-width:100%;max-height:100%;object-fit:contain;box-shadow:0 0 0 1px #d6d6d6}\n.sheet.docp .docload{color:#888;font-size:18px}\n.sheet.docp .docbadge{position:absolute;right:18px;bottom:16px;background:rgba(31,58,95,.93);color:#fff;font-size:17px;line-height:1.45;padding:8px 14px;border-radius:6px;text-align:right}\n.sheet.docp .docbadge small{font-size:13px;opacity:.9}\n.order{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin:0 0 14px}\n.order>summary{cursor:pointer;padding:10px 14px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;list-style:none}\n.order>summary::-webkit-details-marker{display:none}\n.order>summary::before{content:\"▸\";color:var(--muted)}\n.order[open]>summary::before{content:\"▾\"}\n.order-body{padding:0 14px 12px}\n.order-body>.note{margin:0 0 6px}\n.order-list{list-style:none;margin:0 0 10px;padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}\n.order-list li{display:flex;align-items:center;gap:8px;padding:6px 8px;border-top:1px solid var(--line);background:var(--panel);font-size:13px}\n.order-list li:first-child{border-top:0}\n.order-list li .grip{width:16px;flex:none;color:var(--muted);cursor:grab;user-select:none;text-align:center;letter-spacing:-2px}\n.order-list li .no{min-width:48px;flex:none;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}\n.order-list li img,.order-list li .ph0{width:42px;height:32px;flex:none;object-fit:cover;border:1px solid var(--line);border-radius:3px;background:var(--bg);display:inline-grid;place-items:center;font-size:16px}\n.order-list li .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.order-list li select{font-size:12px;max-width:112px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--ink)}\n.order-list li .kind{font-size:12px;color:var(--muted);min-width:56px;text-align:center}\n.order-list li.fixed{background:var(--bg)}\n.order-list li.fixed .grip{cursor:default}\n.order-list li.off{opacity:.6}\n.order-list li.sep{background:var(--bg);color:var(--muted);font-size:12px;padding:5px 10px}\n.order-list li.dragging{opacity:.4}\n.order-list li.drop-before{box-shadow:inset 0 3px 0 var(--cta)}\n.order-list li.drop-after{box-shadow:inset 0 -3px 0 var(--cta)}\n.memo-h{display:flex;align-items:flex-end;justify-content:space-between;gap:8px;margin-bottom:4px}\n.memo-h label.f{margin:0}\n.memo-h .note{font-weight:400;margin-left:4px}\n.btn.mic{flex:none;white-space:nowrap}\n.btn.mic.rec{background:#fee2e2;border-color:#ef4444;color:#b91c1c}\n.mic-live{font-size:12px;color:var(--muted);line-height:1.5}\n.mic-live:not(:empty){padding:4px 2px 0}\n.memo-foot{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin:6px 0 10px}\n.memo-foot .note{margin:0;font-size:12px;line-height:1.55}\n.memo-foot .btn{flex:none;white-space:nowrap}\n.bin li .ri.ok{color:var(--ok)}\n.bin li .ri.ng{color:var(--bad)}\n.ic{border:none;background:none;cursor:pointer;padding:2px 4px;color:var(--muted);font-size:13px;line-height:1}\n.ic:hover{color:var(--ink)}\n.ic.on{color:var(--cta);font-weight:700}\n.ic:disabled{opacity:.3;cursor:default}\n.tag{font-size:10px;padding:1px 6px;border-radius:8px;background:var(--accent-soft);color:var(--accent)}\n.tag.on{background:var(--cta);color:var(--cta-ink)}\nlabel.f{display:block;font-size:12px;color:var(--muted);margin:8px 0 3px}\n.in,textarea.in,select.in{width:100%;border:1px solid var(--line);border-radius:6px;padding:6px 8px;background:var(--panel)}\ntextarea.in{resize:vertical;min-height:60px}\n.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}\n.grid3{display:grid;grid-template-columns:1.25fr 1.1fr .75fr;gap:0 8px}\n.go{width:100%;padding:13px;font-size:16px;margin-top:10px}\n.chk{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted);margin-top:8px;cursor:pointer}\n.status{margin-top:10px;font-size:12px;border-radius:8px;padding:10px 12px;background:var(--accent-soft);display:none}\n.status.show{display:block}\n.status ol{margin:4px 0 0;padding-left:18px}\n.status li.done{color:var(--ok)}\n.status li.run{font-weight:700}\n.status li.err{color:var(--bad)}\n.status li.skip{color:var(--muted)}\ndetails.sec{border:1px solid var(--line);border-radius:8px;margin-bottom:8px;background:var(--panel)}\ndetails.sec>summary{cursor:pointer;padding:9px 12px;font-weight:700;font-size:13px;list-style:none;display:flex;justify-content:space-between;gap:8px}\ndetails.sec>summary::-webkit-details-marker{display:none}\ndetails.sec>summary::after{content:\"＋\";color:var(--muted)}\ndetails.sec[open]>summary::after{content:\"－\"}\ndetails.sec .body{padding:2px 12px 12px}\n.fld.unc .in{border-color:var(--warn);background:var(--warn-soft)}\n.fld .hint{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.45}\n.fld.unc .hint{color:var(--warn)}\n.chip{display:inline-block;font-size:10px;padding:1px 6px;border-radius:9px;margin-left:6px;vertical-align:1px;background:var(--accent-soft);color:var(--accent)}\n.chip.ai{background:var(--warn-soft);color:var(--warn)}\n.chip.web{background:var(--ok-soft);color:var(--ok)}\n.chip.doc{background:#e8eefc;color:#2a4a9b}\n.ex-row{display:grid;grid-template-columns:minmax(90px,34%) 1fr auto;gap:6px;align-items:center;margin-top:6px}\n.ex-row .hint{grid-column:1/-1}\n.bin li .dk{font-size:15px;line-height:1}\n.drop-more{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 4px}\n.drop-more .note{font-size:11px}\n.ver{font-size:10.5px;color:var(--muted);margin-left:6px;white-space:nowrap}\n.linkbox{display:flex;gap:6px;margin-top:8px}\n.linkbox input{flex:1;min-width:0;font-size:12px}\n#pasteBox .mbox{max-width:640px}\n#pasteBox .pg-body textarea{width:100%;min-height:220px}\n.legend{font-size:11px;color:var(--muted);margin:4px 0 10px}\n.note{font-size:12px;color:var(--muted)}\n.intern{font-size:12px;background:var(--accent-soft);border-radius:6px;padding:8px 10px;white-space:pre-wrap}\n.qcard{border:1px solid var(--warn);background:var(--warn-soft);border-radius:8px;padding:10px 12px;margin-bottom:10px}\n.qcard h3{margin:0 0 6px;font-size:13px}\n.q{border-top:1px dashed var(--line);padding:8px 0 4px}\n.q:first-of-type{border-top:none}\n.q p{margin:0 0 6px;font-size:13px}\n.q .opts{display:flex;flex-wrap:wrap;gap:6px}\n.q .row{display:flex;gap:6px;margin-top:6px}\n.q .row input{flex:1}\n.facts{font-size:12px}\n.facts table{width:100%;border-collapse:collapse;margin:4px 0 8px}\n.facts td,.facts th{border-bottom:1px solid var(--line);padding:3px 4px;text-align:left;vertical-align:top}\n.facts th{color:var(--muted);font-weight:500;white-space:nowrap;width:1%}\n.facts td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}\n.toolbar{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}\n.toolbar .note{flex:1;text-align:right}\n.banner{background:var(--warn-soft);color:var(--ink);border:1px solid var(--warn);border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:14px}\n.banner.bad{background:var(--bad-soft);border-color:var(--bad)}\n.pages{display:flex;flex-direction:column;align-items:center;gap:26px}\n.pg-wrap{position:relative}\n.pg-tag{position:absolute;left:-2px;top:-20px;font-size:11px;color:var(--muted)}\n.pg-scale{transform-origin:top left}\n.pg-box{box-shadow:0 2px 14px rgba(0,0,0,.18);background:#fff}\n.toggles{display:flex;flex-direction:column;gap:4px;font-size:13px}\n.toggles label{display:flex;gap:6px;align-items:center;cursor:pointer}\n.toggles select{font-size:12px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel)}\n.toast{position:fixed;right:20px;bottom:20px;background:var(--ink);color:var(--panel);padding:10px 14px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none;max-width:440px;z-index:40}\n.toast.show{opacity:1;transform:none}\n.busy{position:fixed;inset:0;background:var(--bg);z-index:30;display:none;place-items:center;text-align:center}\n.busy.show{display:grid}\n.busy b{display:block;font-size:18px;margin-bottom:6px}\n.busy span{color:var(--muted)}\n/* 計測モーダル */\n.modal{position:fixed;inset:0;background:rgba(10,14,20,.55);z-index:35;display:none;align-items:center;justify-content:center;padding:16px}\n.modal.show{display:flex}\n.pg-guide{max-width:620px;width:100%}\n.pg-guide .mtop{display:flex;align-items:center;justify-content:space-between;gap:10px}\n.pg-body{padding:6px 18px 18px;line-height:1.75;font-size:14px}\n.pg-body ul{margin:8px 0 10px;padding-left:20px}\n.pg-body li{margin:6px 0}\n.pcbadge{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:999px;background:#e8f0fb;color:#1f3a5f;font:700 11px/1.6 var(--f-body, sans-serif);letter-spacing:.04em;vertical-align:middle}\n#aiSet[hidden]{display:none!important}\n#aiSet .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}\n#aiKeyState{font-weight:700;font-size:12.5px;margin:2px 0 6px}\n#coDist[hidden],#coLinkBox[hidden]{display:none!important}\n#coDist{margin-top:14px;padding-top:12px;border-top:1px dashed var(--line)}\n.dist-h{font-size:13.5px;margin:0 0 2px}\n#printArea{display:none}\n@media print{\n  @page{size:A4 portrait;margin:0}\n  html,body{background:#fff!important;margin:0!important;padding:0!important}\n  body>*:not(#printArea){display:none!important}\n  #printArea{display:block!important}\n  #printArea .pp{width:210mm;height:296mm;overflow:hidden;break-after:page;page-break-after:always;break-inside:avoid}\n  #printArea .pp:last-child{break-after:auto;page-break-after:auto}\n  #printArea .pp img{width:100%;height:100%;object-fit:contain;display:block}\n}\n.mbox{background:var(--panel);border-radius:10px;width:min(1100px,100%);max-height:100%;display:flex;flex-direction:column;overflow:hidden}\n.mtop,.mbot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid var(--line);font-size:13px}\n.mbot{border-bottom:none;border-top:1px solid var(--line)}\n.mtop b{font-size:15px}\n.mtop input,.mbot input,.mtop select{width:80px;border:1px solid var(--line);border-radius:4px;padding:3px 6px;background:var(--panel)}\n.mtop select{width:auto;max-width:260px}\n.mcv{overflow:auto;flex:1;min-height:200px;background:#f4f4f4}\n.mcv canvas{display:block;cursor:crosshair}\n.mres{font-weight:700;font-size:15px;color:var(--cta)}\n@media (max-width:900px){.wrap{grid-template-columns:1fr}.side{position:static;max-height:none;border-right:none}}\n@media (prefers-reduced-motion:reduce){*{transition:none!important}}\n\n/* ===== 印刷シート（常に白い紙） ===== */\n.sheet{width:794px;height:1123px;background:#fff;color:#111;position:relative;overflow:hidden;font-family:\"Noto Sans JP\",sans-serif;--fs:11.2px;font-size:var(--fs)}\n.sheet.land{width:1123px;height:794px}\n.s1{padding:28px 34px 24px;display:flex;flex-direction:column;gap:7px}\n.catch{border:1.5px solid #1f3a5f;background:#eef4fb;padding:8px 12px 9px;line-height:1.55;position:relative}\n.catch::before{content:\"\";position:absolute;inset:2px;border:1px solid #c9d8ea;pointer-events:none}\n.catch .t{font-weight:900;color:#1f3a5f;font-size:calc(var(--fs) * 1.36);text-align:center}\n.catch .l{font-weight:500;font-size:calc(var(--fs) * 1.06);text-align:center}\n.pts{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;margin-top:7px;padding-top:7px;border-top:1px dashed #9db3cf;position:relative}\n.pt{display:flex;gap:6px;align-items:flex-start;line-height:1.45;font-size:calc(var(--fs) * .93)}\n.pt b{flex:none;background:#1f3a5f;color:#fff;font-size:calc(var(--fs) * .78);padding:1px 6px;border-radius:2px;margin-top:2px;letter-spacing:.04em;min-width:52px;text-align:center}\n.s-title{text-align:center;font-family:\"Noto Serif JP\",serif;font-weight:800;font-size:calc(var(--fs) * 1.8);letter-spacing:.5em;margin:0 0 -1px;padding-left:.5em}\ntable.gai{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;border:1.6px solid #111}\ntable.gai td{border:0;border-right:.8px solid #333;border-bottom:.8px solid #333;padding:2px 6px;vertical-align:middle;line-height:1.38;height:calc(var(--fs) * 1.8)}\ntable.gai td.cat{width:76px;text-align:center;font-weight:700;background:#1f3a5f;color:#fff;letter-spacing:.3em;padding-left:.3em;border-bottom-color:#6d84a3}\ntable.gai td.sub{width:92px;text-align:center;background:#f2f5f9;color:#222;font-weight:500;letter-spacing:.12em}\ntable.gai td.sub2{text-align:center;background:#f2f5f9;letter-spacing:.12em}\ntable.gai td.sub.exl{letter-spacing:0;font-size:.9em;line-height:1.25}\ntable.gai td.v{font-weight:500}\ntable.gai td.c{text-align:center;font-weight:500}\ntable.gai td.name{font-size:calc(var(--fs) * 1.45);font-weight:700;letter-spacing:.04em}\ntable.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:center;letter-spacing:.12em;color:#c2410c}\n.cn{display:inline-block;width:1.15em;text-align:left}\n.ar{display:flex;align-items:baseline;gap:4px;justify-content:center;font-variant-numeric:tabular-nums}\n.ar .k{font-weight:700;min-width:72px;text-align:right}\n.ar .t{color:#333}\n.tr-row{display:grid;grid-template-columns:1.25fr 1fr .55fr;gap:6px}\n.tr-row span:nth-child(3){text-align:right;font-weight:700}\n.rmk{display:flex;flex:1;min-height:56px;border:1.6px solid #111;border-top-width:0;margin-top:-7px}\n.rmk .cat{width:76px;flex:none;display:flex;align-items:center;justify-content:center;background:#1f3a5f;color:#fff;font-weight:700;letter-spacing:.3em;padding-left:.3em}\n.rmk .body{padding:7px 12px;line-height:1.65;white-space:pre-wrap;flex:1;font-weight:500}\n.foot{display:grid;grid-template-columns:1fr 1.15fr;border:1.6px solid #111;margin-top:4px}\n.foot .a{padding:7px 12px;border-right:1px solid #111;display:flex;flex-direction:column;justify-content:space-between;gap:3px}\n.foot .a .lic{font-size:calc(var(--fs) * .92)}\n.foot .a .assoc{font-size:calc(var(--fs) * .78);color:#333;white-space:pre-wrap;line-height:1.45}\n.foot .a .co{font-size:calc(var(--fs) * 1.55);font-weight:900;letter-spacing:.08em}\n.foot .a .co .br{font-size:.66em;margin-left:.6em;letter-spacing:.12em}\n.foot .a .lixil{display:inline-block;background:#e2580e;color:#fff;font-size:calc(var(--fs) * .72);font-weight:700;padding:1px 6px;letter-spacing:.06em;align-self:flex-start}\n.foot .b{padding:6px 10px 6px 12px;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}\n.foot .b .tel{color:#c2410c;font-weight:900;font-size:calc(var(--fs) * 1.6);letter-spacing:.06em;line-height:1.2}\n.foot .b .ln{font-size:calc(var(--fs) * .88);line-height:1.5}\n.foot .b .qr{text-align:center;font-size:calc(var(--fs) * .72)}\n.foot .b .qr img{width:66px;height:66px;display:block;image-rendering:pixelated}\n.hl .unc{background:#fff0c2;box-shadow:inset 0 -2px 0 #e0a52b}\n.sheet.photo{background:#111}\n.sheet .bgimg{position:absolute;inset:0;background-size:cover;background-position:center}\n.sheet.mapp,.sheet.ph{display:flex;flex-direction:column;padding:26px 30px 22px}\n.mhead{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;border-bottom:2px solid #1f3a5f;padding-bottom:5px;margin-bottom:12px}\n.mhead b{font-size:20px;color:#1f3a5f;letter-spacing:.2em;white-space:nowrap}\n.mhead span{font-size:11px;color:#555;text-align:right}\n.mbody{flex:1;display:flex;align-items:center;justify-content:center;min-height:0}\n.mbody img{max-width:100%;max-height:100%;display:block}\n.mfoot{font-size:10px;color:#666;text-align:right;margin-top:8px}\n.phbox{flex:1;display:grid;gap:8px;min-height:0}\n.phc{position:relative;background-size:cover;background-position:center;background-color:#e9ecef;min-height:0}\n.phc span{position:absolute;left:0;bottom:0;background:rgba(17,24,39,.74);color:#fff;font-size:11px;padding:3px 9px;letter-spacing:.04em;max-width:100%}\n.phbox.L5{grid-template-columns:1fr 1fr;grid-template-rows:1.6fr 1fr 1fr}\n.phbox.L5 .c0{grid-column:1/3}\n.phbox.P5{grid-template-columns:1.2fr 1fr;grid-template-rows:1fr 1fr .95fr}\n.phbox.P5 .c0{grid-row:1/3}\n.phbox.L4{grid-template-columns:1fr 1fr 1fr;grid-template-rows:1.7fr 1fr}\n.phbox.L4 .c0{grid-column:1/4}\n.phbox.P4{grid-template-columns:1.25fr 1fr;grid-template-rows:1fr 1fr 1fr}\n.phbox.P4 .c0{grid-row:1/4}\n.phbox.L3,.phbox.P3{grid-template-columns:1fr 1fr;grid-template-rows:1.6fr 1fr}\n.phbox.L3 .c0,.phbox.P3 .c0{grid-column:1/3}\n.phbox.L2,.phbox.P2{grid-template-columns:1fr;grid-template-rows:1.4fr 1fr}\n.phbox.L1,.phbox.P1{grid-template-columns:1fr;grid-template-rows:1fr}\n.phbox.G6{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr 1fr}\n\u003c/style>\n\u003c/head>\n\u003cbody>\n\u003cheader class=\"top\">\n  \u003cdiv class=\"brand\">\u003cb>物件資料メーカー\u003c/b>\u003cspan>株式会社大央ハウジング｜登記簿・物件レポート・地図・写真から物件概要書を自動作成\u003c/span>\u003c/div>\n  \u003cspan class=\"aichip\" id=\"aiChip\" role=\"status\">AI：確認中…\u003c/span>\n  \u003cdiv class=\"sp\">\u003c/div>\n  \u003cbutton class=\"btn ghost\" id=\"btnNew\" type=\"button\">新しい物件を作る\u003c/button>\n  \u003cbutton class=\"btn ghost\" id=\"btnPdf\" type=\"button\">PDFで書き出す\u003c/button>\n  \u003cbutton class=\"btn primary\" id=\"btnPrint\" type=\"button\">🖨 印刷する\u003c/button>\n\u003c/header>\n\u003cdiv class=\"wrap\">\n  \u003caside class=\"side\">\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">1\u003c/span>資料をまとめてドロップ\u003c/h2>\n      \u003cdiv class=\"drop\" id=\"drop\" tabindex=\"0\" role=\"button\" aria-label=\"ファイルを選択\">\n        \u003cstrong>登記簿・物件レポート・公図・地図・写真・その他の資料\u003c/strong>\n        \u003csmall>PDF・画像・Word・Excel・CSV・テキストを何件でも一度に。他社の販売図面やポータルの物件ページも読み取ります\u003c/small>\n        \u003cinput type=\"file\" id=\"file\" multiple accept=\".pdf,application/pdf,image/*,.docx,.docm,.xlsx,.xlsm,.pptx,.csv,.tsv,.txt,.md,.html,.htm,.eml,.json\" hidden>\n      \u003c/div>\n      \u003cdiv class=\"drop-more\">\u003cbutton class=\"btn sm\" id=\"btnPasteText\" type=\"button\">文章を貼り付けて読み込む\u003c/button>\u003cspan class=\"note\">画面写し（スクリーンショット）や文章は Ctrl+V（Macは⌘+V）でも入れられます\u003c/span>\u003c/div>\n      \u003cdiv id=\"bins\">\u003c/div>\n    \u003c/section>\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">2\u003c/span>備考メモ（話すだけでOK）と自動作成\u003c/h2>\n      \u003cdiv class=\"memo-h\">\n        \u003clabel class=\"f\" for=\"memo\">備考メモ \u003cspan class=\"note\">（思いついた順でOK）\u003c/span>\u003c/label>\n        \u003cbutton class=\"btn sm mic\" id=\"btnMic\" type=\"button\" hidden aria-pressed=\"false\">🎤 話して入力\u003c/button>\n      \u003c/div>\n      \u003ctextarea class=\"in\" id=\"memo\" rows=\"5\" placeholder=\"例）えーと、この物件は借地権で、地代は年間30万円かかります。あと雨漏りの箇所がいくつかあって、旧耐震の建物です。現況は賃貸中で、引渡しはご相談で。\">\u003c/textarea>\n      \u003cdiv class=\"mic-live\" id=\"micLive\" aria-live=\"polite\">\u003c/div>\n      \u003cdiv class=\"memo-foot\">\n        \u003cp class=\"note\">「物件資料を自動作成」を押すと、AIが備考欄に箇条書きで整理します。借地権・現況などは概要の欄にも反映します。\u003cspan id=\"micKbd\" hidden>スマホ・タブレットでは、キーボードのマイク（音声入力）で話して入力できます。\u003c/span>\u003c/p>\n        \u003cbutton class=\"btn sm\" id=\"btnTidy\" type=\"button\">備考だけ整理する\u003c/button>\n      \u003c/div>\n      \u003clabel class=\"f\" for=\"memoPrice\">売出価格（空欄ならレポートの想定価格）\u003c/label>\u003cinput class=\"in\" id=\"memoPrice\" placeholder=\"例）7億5,000万円\">\n      \u003cdiv class=\"grid2\">\n        \u003cdiv>\u003clabel class=\"f\" for=\"memoOffice\">帯（店舗）\u003c/label>\u003cselect class=\"in\" id=\"memoOffice\">\u003c/select>\u003c/div>\n        \u003cdiv>\u003clabel class=\"f\" for=\"memoTanto\">担当者 \u003cspan class=\"note\">（手入力できます）\u003c/span>\u003c/label>\u003cinput class=\"in\" id=\"memoTanto\" list=\"tantoList\" autocomplete=\"off\" placeholder=\"例）山田太郎 090-1234-5678\">\u003cdatalist id=\"tantoList\">\u003c/datalist>\u003c/div>\n      \u003c/div>\n      \u003clabel class=\"chk\">\u003cinput type=\"checkbox\" id=\"hiAcc\"> 高精度モード（時間はかかりますが、より慎重に読み取ります）\u003c/label>\n      \u003cbutton class=\"btn primary go\" id=\"btnGen\" type=\"button\">物件資料を自動作成\u003c/button>\n      \u003cdiv class=\"status\" id=\"status\" aria-live=\"polite\">\u003c/div>\n      \u003cdetails class=\"sec\" style=\"margin-top:12px\" id=\"webSec\">\n        \u003csummary>ネットの情報で裏付ける（任意）\u003c/summary>\n        \u003cdiv class=\"body\">\n          \u003cp class=\"note\" style=\"margin:6px 0 8px\">このアプリのAIはインターネットを直接検索できません。ネットで裏付けたいときは、指示文をコピーして Claude に貼り付け、返ってきた回答をここへ貼り付けてください。キャッチコピー・アピールポイント・交通・学校区に反映します。\u003c/p>\n          \u003cdiv style=\"display:flex;gap:8px;flex-wrap:wrap;align-items:center\">\u003cbutton class=\"btn sm\" id=\"btnCopyPrompt\" type=\"button\">調査の指示文をコピー\u003c/button>\u003ca href=\"https://claude.ai/new\" target=\"_blank\" rel=\"noopener\" class=\"note\">Claude を開く ↗\u003c/a>\u003c/div>\n          \u003ctextarea class=\"in\" id=\"promptBox\" rows=\"4\" style=\"margin-top:8px;display:none\" readonly>\u003c/textarea>\n          \u003ctextarea class=\"in\" id=\"webPaste\" rows=\"4\" style=\"margin-top:8px\" placeholder=\"Claude の回答をここに貼り付け\">\u003c/textarea>\n          \u003cbutton class=\"btn sm\" id=\"btnImport\" type=\"button\" style=\"margin-top:6px\">回答を取り込む\u003c/button>\n        \u003c/div>\n      \u003c/details>\n      \u003cdetails class=\"sec\" id=\"aiSet\" hidden>\n        \u003csummary>AIの設定（パソコン版）\u003c/summary>\n        \u003cdiv class=\"body\">\n          \u003cp class=\"note\" style=\"margin:6px 0 8px\">パソコン版でAI（物件レポート・公図・地図の読み取り、資料の判別、アピールポイントの作成など）を使うには、Anthropic社のAPIキーが必要です。利用料は使った分だけAnthropic社から請求されます。キーはこのパソコンのブラウザの中にだけ保存され、AIに読み取りを頼むときだけAnthropic社へ送られます。共用のパソコンでは、使い終わったら「キーを消す」を押してください。\u003c/p>\n          \u003cdiv id=\"aiKeyState\">APIキー：未設定\u003c/div>\n          \u003clabel class=\"f\" for=\"aiKey\">APIキー\u003c/label>\u003cinput class=\"in\" id=\"aiKey\" type=\"password\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"sk-ant-…\">\n          \u003clabel class=\"f\" for=\"aiModel\">AIのモデル\u003c/label>\n          \u003cselect class=\"in\" id=\"aiModel\">\n            \u003coption value=\"\">おすすめ（通常は Sonnet、高精度モードは Opus）\u003c/option>\n            \u003coption value=\"claude-sonnet-5-5\">Claude Sonnet 5.5（標準）\u003c/option>\n            \u003coption value=\"claude-opus-5-5\">Claude Opus 5.5（最も正確・料金は高め）\u003c/option>\n            \u003coption value=\"claude-haiku-5-5\">Claude Haiku 5.5（速い・安い・精度はやや下がる）\u003c/option>\n          \u003c/select>\n          \u003cdiv class=\"row\">\u003cbutton class=\"btn sm primary\" id=\"aiSave\" type=\"button\">保存してAIを使う\u003c/button>\u003cbutton class=\"btn sm\" id=\"aiClear\" type=\"button\">キーを消す\u003c/button>\u003c/div>\n          \u003cp class=\"note\" style=\"margin-top:8px\">APIキーは Anthropic のコンソール（platform.claude.com）で発行できます。\u003c/p>\n          \u003cdiv id=\"coDist\" hidden>\n            \u003ch3 class=\"dist-h\">社員に配るリンク・ファイル（AI付き）\u003c/h3>\n            \u003cp class=\"note\" style=\"margin:4px 0 8px\">\u003cb>社員用リンク\u003c/b>：開くだけで、claude.ai のアカウントもAPIキーの入力もなしにAIまで使えるWeb版のリンクです（スマホでも使えます）。\u003cb>社員用ファイル\u003c/b>：同じことができる「物件資料メーカー_社内用.html」です（店舗・担当者の一覧も入ります）。\u003cb>どちらも社外の人には渡さないでください\u003c/b>。リンクやファイルの中のキーは読みにくくしてありますが、完全には隠せません。漏れたときは、Anthropicのコンソールでキーを無効にして作り直してください。\u003c/p>\n            \u003clabel class=\"f\" for=\"coKey\">社員用のAPIキー \u003cspan class=\"note\">（空欄ならこのパソコンのキー。社員用に別のキーを発行するのがおすすめ）\u003c/span>\u003c/label>\n            \u003cinput class=\"in\" id=\"coKey\" type=\"password\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"空欄ならこのパソコンのキーを使います\">\n            \u003cdiv class=\"row\">\u003cbutton class=\"btn sm primary\" id=\"coLink\" type=\"button\">社員用のリンクを作る\u003c/button>\u003cbutton class=\"btn sm\" id=\"coMake\" type=\"button\">社員用のファイルを作る\u003c/button>\u003c/div>\n            \u003cdiv class=\"linkbox\" id=\"coLinkBox\" hidden>\u003cinput class=\"in\" id=\"coLinkOut\" readonly aria-label=\"社員用リンク\">\u003cbutton class=\"btn sm\" id=\"coLinkCopy\" type=\"button\">コピー\u003c/button>\u003c/div>\n          \u003c/div>\n        \u003c/div>\n      \u003c/details>\n    \u003c/section>\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">3\u003c/span>内容の確認・修正\u003c/h2>\n      \u003cdiv class=\"legend\">黄色の項目は推定です。確認した値に書き換えるとすぐプレビューに反映され、黄色が消えます。\u003c/div>\n      \u003cdiv id=\"qbox\">\u003c/div>\n      \u003cdiv id=\"form\">\u003c/div>\n    \u003c/section>\n  \u003c/aside>\n  \u003cmain class=\"stage\">\n    \u003cdiv class=\"toolbar\">\n      \u003cdiv class=\"toggles\">\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgPts\" checked> アピールポイントを載せる\u003c/label>\n        \u003clabel>写真ページ \u003cselect id=\"tgPhoto\">\u003coption value=\"5\">5枚レイアウト\u003c/option>\u003coption value=\"1\">外観1枚（全面）\u003c/option>\u003coption value=\"0\">入れない\u003c/option>\u003c/select>\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgCap\" checked> 写真に説明を入れる\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgMapHead\" checked> 地図ページに見出しを付ける\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgEnhance\" checked> 写真を明るく補正する\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgHl\" checked> 要確認の項目をプレビューで強調（PDFには出ません）\u003c/label>\n      \u003c/div>\n      \u003cdiv class=\"note\" id=\"pageCount\">\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"banner\" id=\"sampleBanner\">いま表示しているのは見本（前島三丁目一棟ビル）です。「新しい物件を作る」を押してから資料を入れてください。\u003c/div>\n    \u003cdiv class=\"banner bad\" id=\"aiBanner\" style=\"display:none\">\u003c/div>\n    \u003cdiv class=\"banner bad\" id=\"errBanner\" style=\"display:none\" role=\"alert\">\u003c/div>\n    \u003cdetails class=\"order\" id=\"orderBox\" open>\n      \u003csummary>\u003cb>資料の順番（PDFの並び）\u003c/b>\u003cspan class=\"note\" id=\"orderMode\">\u003c/span>\u003c/summary>\n      \u003cdiv class=\"order-body\">\n        \u003cp class=\"note\">行をドラッグするか ▲▼ で入れ替えられます。✕ で外した資料はPDFに入りません（「戻す」で元に戻せます）。資料の種類もここで直せます。\u003c/p>\n        \u003col class=\"order-list\" id=\"orderList\">\u003c/ol>\n        \u003cbutton class=\"btn sm\" id=\"orderReset\" type=\"button\">標準の順番に戻す\u003c/button>\n      \u003c/div>\n    \u003c/details>\n    \u003cdiv class=\"pages\" id=\"pages\">\u003c/div>\n  \u003c/main>\n\u003c/div>\n\u003cdiv class=\"modal\" id=\"printGuide\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"pgTitle\">\n  \u003cdiv class=\"mbox pg-guide\">\n    \u003cdiv class=\"mtop\">\u003cb id=\"pgTitle\">印刷用のPDFを用意しました\u003c/b>\u003cspan class=\"sp\">\u003c/span>\u003cbutton class=\"btn sm\" id=\"pgClose\" type=\"button\">閉じる\u003c/button>\u003c/div>\n    \u003cdiv class=\"pg-body\" id=\"pgBody\">\n      \u003cp>保存したPDFを開いて、プリンター（コピー機）を選んで印刷してください。\u003c/p>\n      \u003cul>\n        \u003cli>\u003cb>パソコン：\u003c/b>ダウンロードしたPDFを開き、\u003cb>Ctrl＋P\u003c/b>（Macは\u003cb>⌘＋P\u003c/b>）→ プリンターでコピー機を選んで「印刷」。用紙は\u003cb>A4\u003c/b>、倍率は\u003cb>「実際のサイズ」または「用紙に合わせる」\u003c/b>にしてください。\u003c/li>\n        \u003cli>\u003cb>iPhone・iPad：\u003c/b>表示された共有メニューの\u003cb>「プリント」\u003c/b>から、コピー機を選んで印刷できます（コピー機がAirPrintに対応している場合）。\u003c/li>\n      \u003c/ul>\n      \u003cp class=\"note\">このアプリはclaude.aiの安全な枠の中で動いているため、ページから直接プリンターの画面を開くことができません。そのため、印刷用のPDFを保存してから印刷する流れになっています。\u003c/p>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv class=\"modal\" id=\"measure\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"msTitle\">\n  \u003cdiv class=\"mbox\">\n    \u003cdiv class=\"mtop\">\n      \u003cb id=\"msTitle\">図面で測る\u003c/b>\n      \u003cselect id=\"msMap\" aria-label=\"図面\">\u003c/select>\n      \u003cspan id=\"msScaleWrap\">縮尺 1/\u003cinput id=\"msDen\" type=\"number\" min=\"50\" step=\"50\" value=\"500\" aria-label=\"縮尺の分母\">\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msZoomOut\" type=\"button\" aria-label=\"縮小\">－\u003c/button>\n      \u003cbutton class=\"btn sm\" id=\"msZoomIn\" type=\"button\" aria-label=\"拡大\">＋\u003c/button>\n      \u003cspan class=\"note\" id=\"msInfo\">\u003c/span>\n      \u003cspan style=\"flex:1\">\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msClose\" type=\"button\">閉じる\u003c/button>\n    \u003c/div>\n    \u003cdiv class=\"mcv\" id=\"msWrap\">\u003ccanvas id=\"msCanvas\">\u003c/canvas>\u003c/div>\n    \u003cdiv class=\"mbot\">\n      \u003cspan class=\"note\">2点をクリックすると距離を測ります。\u003c/span>\n      \u003cspan class=\"mres\" id=\"msRes\">—\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msToFront\" type=\"button\" disabled>間口に入れる\u003c/button>\n      \u003cbutton class=\"btn sm\" id=\"msToRoad\" type=\"button\" disabled>道路幅員に入れる\u003c/button>\n      \u003cspan class=\"note\">｜縮尺が分からない図面は、縮尺バーなど長さの分かる2点を測って\u003c/span>\n      \u003cinput id=\"msLen\" type=\"number\" step=\"0.1\" placeholder=\"長さm\" aria-label=\"既知の長さ（メートル）\">\n      \u003cbutton class=\"btn sm\" id=\"msCalib\" type=\"button\" disabled>で校正\u003c/button>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv id=\"offscreen\" style=\"position:fixed;left:0;top:0;z-index:-10;pointer-events:none\" aria-hidden=\"true\">\u003c/div>\n\u003cdiv class=\"busy\" id=\"busy\">\u003cdiv>\u003cb>PDFを作成しています\u003c/b>\u003cspan>ページ数が多いと数十秒かかります\u003c/span>\u003c/div>\u003c/div>\n\u003cdiv class=\"modal\" id=\"pasteBox\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"pbTitle\">\n  \u003cdiv class=\"mbox pg-guide\">\n    \u003cdiv class=\"mtop\">\u003cb id=\"pbTitle\">文章を貼り付けて読み込む\u003c/b>\u003cspan class=\"sp\">\u003c/span>\u003cbutton class=\"btn sm\" id=\"pbClose\" type=\"button\">閉じる\u003c/button>\u003c/div>\n    \u003cdiv class=\"pg-body\">\n      \u003cp class=\"note\" style=\"margin:0 0 8px\">グーホーム・うちなーらいふなどの物件ページや、他社から届いたメール・資料の文章を貼り付けてください。ページを開いて Ctrl+A（すべて選ぶ）→ Ctrl+C（コピー）→ ここに Ctrl+V で入ります。写真は画面写しで入れてください。\u003c/p>\n      \u003clabel class=\"f\" for=\"pbName\">資料の名前（任意）\u003c/label>\u003cinput class=\"in\" id=\"pbName\" placeholder=\"例）グーホームの物件ページ\">\n      \u003clabel class=\"f\" for=\"pbText\">文章\u003c/label>\u003ctextarea class=\"in\" id=\"pbText\" placeholder=\"ここに貼り付け\">\u003c/textarea>\n      \u003cdiv style=\"display:flex;gap:8px;margin-top:10px\">\u003cbutton class=\"btn primary\" id=\"pbOk\" type=\"button\">読み込む\u003c/button>\u003c/div>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv class=\"toast\" id=\"toast\" role=\"status\">\u003c/div>\n\u003cdiv id=\"printArea\" aria-hidden=\"true\">\u003c/div>\n@@APP_SCRIPTS@@\n\u003c/body>\n\u003c/html>\n";</script>
+<script data-app="shell">window.__SHELL="\u003c!DOCTYPE html>\n\u003chtml lang=\"ja\">\n\u003chead>\n\u003cmeta charset=\"utf-8\">\n\u003cmeta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\u003cmeta name=\"robots\" content=\"noindex,nofollow\">\n\u003ctitle>大央ハウジング 物件資料メーカー\u003c/title>\n\u003clink rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n\u003clink rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n\u003clink href=\"https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Serif+JP:wght@600;800&display=swap\" rel=\"stylesheet\">\n\u003cstyle>\n/* Layout: left = 資料投入・確認 / right = A4プレビュー（印刷物そのもの） */\n:root{\n  --bg:#eef1f4; --panel:#ffffff; --ink:#1b2430; --muted:#5d6977; --line:#d6dde4;\n  --accent:#1f3a5f; --accent-soft:#e3eaf3; --cta:#e2580e; --cta-ink:#fff;\n  --warn:#b7791f; --warn-soft:#fdf3dd; --ok:#2f7d4f; --ok-soft:#e2f2e8; --bad:#b42318; --bad-soft:#fde8e6;\n  --f-body:\"Noto Sans JP\",\"Hiragino Sans\",\"Yu Gothic\",sans-serif;\n  --f-display:\"Noto Serif JP\",\"Hiragino Mincho ProN\",\"Yu Mincho\",serif;\n  color-scheme:light;\n}\n@media (prefers-color-scheme: dark){\n  :root:not([data-theme=\"light\"]){\n    --bg:#12171d; --panel:#1b222b; --ink:#e7ecf1; --muted:#9aa7b4; --line:#2e3844;\n    --accent:#8db4e2; --accent-soft:#223246; --cta:#f07a35; --cta-ink:#1a0f08;\n    --warn:#e8b45a; --warn-soft:#3a2f1a; --ok:#6fcf97; --ok-soft:#1d3427; --bad:#f19a8f; --bad-soft:#3b1f1c; color-scheme:dark;\n  }\n}\n:root[data-theme=\"dark\"]{\n  --bg:#12171d; --panel:#1b222b; --ink:#e7ecf1; --muted:#9aa7b4; --line:#2e3844;\n  --accent:#8db4e2; --accent-soft:#223246; --cta:#f07a35; --cta-ink:#1a0f08;\n  --warn:#e8b45a; --warn-soft:#3a2f1a; --ok:#6fcf97; --ok-soft:#1d3427; --bad:#f19a8f; --bad-soft:#3b1f1c; color-scheme:dark;\n}\n*{box-sizing:border-box}\nhtml,body{height:100%;margin:0}\nbody{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:14px;line-height:1.55}\nbutton,input,select,textarea{font:inherit;color:inherit}\n:focus-visible{outline:2px solid var(--cta);outline-offset:2px}\na{color:var(--accent)}\n.top{display:flex;align-items:center;gap:14px;padding:10px 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}\n.brand{display:flex;flex-direction:column;line-height:1.25}\n.brand b{font-family:var(--f-display);font-size:18px;letter-spacing:.04em}\n.brand span{font-size:11px;color:var(--muted)}\n.top .sp{flex:1}\n.aichip{font-size:12px;padding:4px 10px;border-radius:12px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}\n.aichip.full{background:var(--ok-soft);color:var(--ok)}\n.aichip.text,.aichip.none{background:var(--bad-soft);color:var(--bad)}\n.btn{border:1px solid var(--line);background:var(--panel);border-radius:6px;padding:8px 14px;cursor:pointer;font-weight:500;white-space:nowrap}\n.btn:hover{border-color:var(--accent)}\n.btn.primary{background:var(--cta);border-color:var(--cta);color:var(--cta-ink);font-weight:700}\n.btn.primary:hover{filter:brightness(1.06)}\n.btn.ghost{background:transparent}\n.btn:disabled{opacity:.5;cursor:not-allowed}\n.btn.sm{padding:4px 9px;font-size:12px}\n.wrap{display:grid;grid-template-columns:minmax(370px,460px) 1fr;min-height:calc(100% - 60px)}\n.side{background:var(--panel);border-right:1px solid var(--line);padding:18px 18px 60px;overflow:auto;max-height:calc(100vh - 60px);position:sticky;top:60px}\n.stage{padding:24px;overflow:auto;min-width:0}\n.step{margin-bottom:22px}\n.step h2{font-size:13px;letter-spacing:.06em;color:var(--accent);margin:0 0 8px;display:flex;align-items:center;gap:8px}\n.step h2 .n{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--accent);color:var(--panel);font-size:11px}\n.drop{border:2px dashed var(--line);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s, background .15s}\n.drop:hover,.drop.over{border-color:var(--cta);background:var(--accent-soft)}\n.drop strong{display:block;font-size:15px}\n.drop small{color:var(--muted)}\n.bin{margin-top:12px;border:1px solid var(--line);border-radius:8px;overflow:hidden}\n.bin-h{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 10px;background:var(--accent-soft);font-size:12px;font-weight:700}\n.bin-h em{font-style:normal;font-weight:500;color:var(--muted)}\n.bin ul{list-style:none;margin:0;padding:0}\n.bin li{display:flex;align-items:center;gap:6px;padding:6px 10px;border-top:1px solid var(--line);font-size:12px;flex-wrap:wrap}\n.bin li .nm{flex:1;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.bin li img{width:44px;height:32px;object-fit:cover;border-radius:3px;border:1px solid var(--line)}\n.bin li select,.bin li input[type=text]{font-size:12px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel)}\n.bin li input.cap{flex-basis:100%;margin-left:50px}\n.bin .empty{padding:8px 10px;color:var(--muted);font-size:12px;border-top:1px solid var(--line)}\n.bin li .ri{flex-basis:100%;font-size:11px;line-height:1.45;padding-left:2px}\n.bin li .pgsel{width:58px;padding:2px 5px;font-size:11px;border:1px solid var(--line);border-radius:4px}\n.sheet .wavg{font-size:.86em;font-weight:500;color:#333}\n.sheet.docp{display:flex;align-items:center;justify-content:center;padding:22px;background:#fff}\n.sheet.docp img{max-width:100%;max-height:100%;object-fit:contain;box-shadow:0 0 0 1px #d6d6d6}\n.sheet.docp .docload{color:#888;font-size:18px}\n.sheet.docp .docbadge{position:absolute;right:18px;bottom:16px;background:rgba(31,58,95,.93);color:#fff;font-size:17px;line-height:1.45;padding:8px 14px;border-radius:6px;text-align:right}\n.sheet.docp .docbadge small{font-size:13px;opacity:.9}\n.order{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin:0 0 14px}\n.order>summary{cursor:pointer;padding:10px 14px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;list-style:none}\n.order>summary::-webkit-details-marker{display:none}\n.order>summary::before{content:\"▸\";color:var(--muted)}\n.order[open]>summary::before{content:\"▾\"}\n.order-body{padding:0 14px 12px}\n.order-body>.note{margin:0 0 6px}\n.order-list{list-style:none;margin:0 0 10px;padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}\n.order-list li{display:flex;align-items:center;gap:8px;padding:6px 8px;border-top:1px solid var(--line);background:var(--panel);font-size:13px}\n.order-list li:first-child{border-top:0}\n.order-list li .grip{width:16px;flex:none;color:var(--muted);cursor:grab;user-select:none;text-align:center;letter-spacing:-2px}\n.order-list li .no{min-width:48px;flex:none;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}\n.order-list li img,.order-list li .ph0{width:42px;height:32px;flex:none;object-fit:cover;border:1px solid var(--line);border-radius:3px;background:var(--bg);display:inline-grid;place-items:center;font-size:16px}\n.order-list li .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.order-list li select{font-size:12px;max-width:112px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--ink)}\n.order-list li .kind{font-size:12px;color:var(--muted);min-width:56px;text-align:center}\n.order-list li.fixed{background:var(--bg)}\n.order-list li.fixed .grip{cursor:default}\n.order-list li.off{opacity:.6}\n.order-list li.sep{background:var(--bg);color:var(--muted);font-size:12px;padding:5px 10px}\n.order-list li.dragging{opacity:.4}\n.order-list li.drop-before{box-shadow:inset 0 3px 0 var(--cta)}\n.order-list li.drop-after{box-shadow:inset 0 -3px 0 var(--cta)}\n.memo-h{display:flex;align-items:flex-end;justify-content:space-between;gap:8px;margin-bottom:4px}\n.memo-h label.f{margin:0}\n.memo-h .note{font-weight:400;margin-left:4px}\n.btn.mic{flex:none;white-space:nowrap}\n.btn.mic.rec{background:#fee2e2;border-color:#ef4444;color:#b91c1c}\n.mic-live{font-size:12px;color:var(--muted);line-height:1.5}\n.mic-live:not(:empty){padding:4px 2px 0}\n.memo-foot{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin:6px 0 10px}\n.memo-foot .note{margin:0;font-size:12px;line-height:1.55}\n.memo-foot .btn{flex:none;white-space:nowrap}\n.bin li .ri.ok{color:var(--ok)}\n.bin li .ri.ng{color:var(--bad)}\n.ic{border:none;background:none;cursor:pointer;padding:2px 4px;color:var(--muted);font-size:13px;line-height:1}\n.ic:hover{color:var(--ink)}\n.ic.on{color:var(--cta);font-weight:700}\n.ic:disabled{opacity:.3;cursor:default}\n.tag{font-size:10px;padding:1px 6px;border-radius:8px;background:var(--accent-soft);color:var(--accent)}\n.tag.on{background:var(--cta);color:var(--cta-ink)}\nlabel.f{display:block;font-size:12px;color:var(--muted);margin:8px 0 3px}\n.in,textarea.in,select.in{width:100%;border:1px solid var(--line);border-radius:6px;padding:6px 8px;background:var(--panel)}\ntextarea.in{resize:vertical;min-height:60px}\n.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}\n.grid3{display:grid;grid-template-columns:1.25fr 1.1fr .75fr;gap:0 8px}\n.go{width:100%;padding:13px;font-size:16px;margin-top:10px}\n.chk{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted);margin-top:8px;cursor:pointer}\n.status{margin-top:10px;font-size:12px;border-radius:8px;padding:10px 12px;background:var(--accent-soft);display:none}\n.status.show{display:block}\n.status ol{margin:4px 0 0;padding-left:18px}\n.status li.done{color:var(--ok)}\n.status li.run{font-weight:700}\n.status li.err{color:var(--bad)}\n.status li.skip{color:var(--muted)}\ndetails.sec{border:1px solid var(--line);border-radius:8px;margin-bottom:8px;background:var(--panel)}\ndetails.sec>summary{cursor:pointer;padding:9px 12px;font-weight:700;font-size:13px;list-style:none;display:flex;justify-content:space-between;gap:8px}\ndetails.sec>summary::-webkit-details-marker{display:none}\ndetails.sec>summary::after{content:\"＋\";color:var(--muted)}\ndetails.sec[open]>summary::after{content:\"－\"}\ndetails.sec .body{padding:2px 12px 12px}\n.fld.unc .in{border-color:var(--warn);background:var(--warn-soft)}\n.fld .hint{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.45}\n.fld.unc .hint{color:var(--warn)}\n.chip{display:inline-block;font-size:10px;padding:1px 6px;border-radius:9px;margin-left:6px;vertical-align:1px;background:var(--accent-soft);color:var(--accent)}\n.chip.ai{background:var(--warn-soft);color:var(--warn)}\n.chip.web{background:var(--ok-soft);color:var(--ok)}\n.chip.doc{background:#e8eefc;color:#2a4a9b}\n.ex-row{display:grid;grid-template-columns:minmax(90px,34%) 1fr auto;gap:6px;align-items:center;margin-top:6px}\n.ex-row .hint{grid-column:1/-1}\n.bin li .dk{font-size:15px;line-height:1}\n.drop-more{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 4px}\n.drop-more .note{font-size:11px}\n.ver{font-size:10.5px;color:var(--muted);margin-left:6px;white-space:nowrap}\n.linkbox{display:flex;gap:6px;margin-top:8px}\n.linkbox input{flex:1;min-width:0;font-size:12px}\n#pasteBox .mbox{max-width:640px}\n#pasteBox .pg-body textarea{width:100%;min-height:220px}\n.legend{font-size:11px;color:var(--muted);margin:4px 0 10px}\n.note{font-size:12px;color:var(--muted)}\n.intern{font-size:12px;background:var(--accent-soft);border-radius:6px;padding:8px 10px;white-space:pre-wrap}\n.qcard{border:1px solid var(--warn);background:var(--warn-soft);border-radius:8px;padding:10px 12px;margin-bottom:10px}\n.qcard h3{margin:0 0 6px;font-size:13px}\n.q{border-top:1px dashed var(--line);padding:8px 0 4px}\n.q:first-of-type{border-top:none}\n.q p{margin:0 0 6px;font-size:13px}\n.q .opts{display:flex;flex-wrap:wrap;gap:6px}\n.q .row{display:flex;gap:6px;margin-top:6px}\n.q .row input{flex:1}\n.facts{font-size:12px}\n.facts table{width:100%;border-collapse:collapse;margin:4px 0 8px}\n.facts td,.facts th{border-bottom:1px solid var(--line);padding:3px 4px;text-align:left;vertical-align:top}\n.facts th{color:var(--muted);font-weight:500;white-space:nowrap;width:1%}\n.facts td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}\n.toolbar{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}\n.toolbar .note{flex:1;text-align:right}\n.banner{background:var(--warn-soft);color:var(--ink);border:1px solid var(--warn);border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:14px}\n.banner.bad{background:var(--bad-soft);border-color:var(--bad)}\n.pages{display:flex;flex-direction:column;align-items:center;gap:26px}\n.pg-wrap{position:relative}\n.pg-tag{position:absolute;left:-2px;top:-20px;font-size:11px;color:var(--muted)}\n.pg-scale{transform-origin:top left}\n.pg-box{box-shadow:0 2px 14px rgba(0,0,0,.18);background:#fff}\n.toggles{display:flex;flex-direction:column;gap:4px;font-size:13px}\n.toggles label{display:flex;gap:6px;align-items:center;cursor:pointer}\n.toggles select{font-size:12px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;background:var(--panel)}\n.toast{position:fixed;right:20px;bottom:20px;background:var(--ink);color:var(--panel);padding:10px 14px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none;max-width:440px;z-index:40}\n.toast.show{opacity:1;transform:none}\n.busy{position:fixed;inset:0;background:var(--bg);z-index:30;display:none;place-items:center;text-align:center}\n.busy.show{display:grid}\n.busy b{display:block;font-size:18px;margin-bottom:6px}\n.busy span{color:var(--muted)}\n/* 計測モーダル */\n.modal{position:fixed;inset:0;background:rgba(10,14,20,.55);z-index:35;display:none;align-items:center;justify-content:center;padding:16px}\n.modal.show{display:flex}\n.pg-guide{max-width:620px;width:100%}\n.pg-guide .mtop{display:flex;align-items:center;justify-content:space-between;gap:10px}\n.pg-body{padding:6px 18px 18px;line-height:1.75;font-size:14px}\n.pg-body ul{margin:8px 0 10px;padding-left:20px}\n.pg-body li{margin:6px 0}\n.pcbadge{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:999px;background:#e8f0fb;color:#1f3a5f;font:700 11px/1.6 var(--f-body, sans-serif);letter-spacing:.04em;vertical-align:middle}\n#aiSet[hidden]{display:none!important}\n#aiSet .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}\n#aiKeyState{font-weight:700;font-size:12.5px;margin:2px 0 6px}\n#coDist[hidden],#coLinkBox[hidden]{display:none!important}\n#coDist{margin-top:14px;padding-top:12px;border-top:1px dashed var(--line)}\n.dist-h{font-size:13.5px;margin:0 0 2px}\n#printArea{display:none}\n@media print{\n  @page{size:A4 portrait;margin:0}\n  html,body{background:#fff!important;margin:0!important;padding:0!important}\n  body>*:not(#printArea){display:none!important}\n  #printArea{display:block!important}\n  #printArea .pp{width:210mm;height:296mm;overflow:hidden;break-after:page;page-break-after:always;break-inside:avoid}\n  #printArea .pp:last-child{break-after:auto;page-break-after:auto}\n  #printArea .pp img{width:100%;height:100%;object-fit:contain;display:block}\n}\n.mbox{background:var(--panel);border-radius:10px;width:min(1100px,100%);max-height:100%;display:flex;flex-direction:column;overflow:hidden}\n.mtop,.mbot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid var(--line);font-size:13px}\n.mbot{border-bottom:none;border-top:1px solid var(--line)}\n.mtop b{font-size:15px}\n.mtop input,.mbot input,.mtop select{width:80px;border:1px solid var(--line);border-radius:4px;padding:3px 6px;background:var(--panel)}\n.mtop select{width:auto;max-width:260px}\n.mcv{overflow:auto;flex:1;min-height:200px;background:#f4f4f4}\n.mcv canvas{display:block;cursor:crosshair}\n.mres{font-weight:700;font-size:15px;color:var(--cta)}\n@media (max-width:900px){.wrap{grid-template-columns:1fr}.side{position:static;max-height:none;border-right:none}}\n@media (prefers-reduced-motion:reduce){*{transition:none!important}}\n\n/* ===== 印刷シート（常に白い紙） ===== */\n.sheet{width:794px;height:1123px;background:#fff;color:#111;position:relative;overflow:hidden;font-family:\"Noto Sans JP\",sans-serif;--fs:11.2px;font-size:var(--fs)}\n.sheet.land{width:1123px;height:794px}\n.s1{padding:28px 34px 24px;display:flex;flex-direction:column;gap:7px}\n.catch{border:1.5px solid #1f3a5f;background:#eef4fb;padding:8px 12px 9px;line-height:1.55;position:relative}\n.catch::before{content:\"\";position:absolute;inset:2px;border:1px solid #c9d8ea;pointer-events:none}\n.catch .t{font-weight:900;color:#1f3a5f;font-size:calc(var(--fs) * 1.36);text-align:center}\n.catch .l{font-weight:500;font-size:calc(var(--fs) * 1.06);text-align:center}\n.pts{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;margin-top:7px;padding-top:7px;border-top:1px dashed #9db3cf;position:relative}\n.pt{display:flex;gap:6px;align-items:flex-start;line-height:1.45;font-size:calc(var(--fs) * .93)}\n.pt b{flex:none;background:#1f3a5f;color:#fff;font-size:calc(var(--fs) * .78);padding:1px 6px;border-radius:2px;margin-top:2px;letter-spacing:.04em;min-width:52px;text-align:center}\n.s-title{text-align:center;font-family:\"Noto Serif JP\",serif;font-weight:800;font-size:calc(var(--fs) * 1.8);letter-spacing:.5em;margin:0 0 -1px;padding-left:.5em}\ntable.gai{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;border:1.6px solid #111}\ntable.gai td{border:0;border-right:.8px solid #333;border-bottom:.8px solid #333;padding:2px 6px;vertical-align:middle;line-height:1.38;height:calc(var(--fs) * 1.8)}\ntable.gai td.cat{width:76px;text-align:center;font-weight:700;background:#1f3a5f;color:#fff;letter-spacing:.3em;padding-left:.3em;border-bottom-color:#6d84a3}\ntable.gai td.sub{width:92px;text-align:center;background:#f2f5f9;color:#222;font-weight:500;letter-spacing:.12em}\ntable.gai td.sub2{text-align:center;background:#f2f5f9;letter-spacing:.12em}\ntable.gai td.sub.exl{letter-spacing:0;font-size:.9em;line-height:1.25}\ntable.gai td.v{font-weight:500}\ntable.gai td.c{text-align:center;font-weight:500}\ntable.gai td.name{font-size:calc(var(--fs) * 1.45);font-weight:700;letter-spacing:.04em}\ntable.gai td.price{font-size:calc(var(--fs) * 1.6);font-weight:900;text-align:center;letter-spacing:.12em;color:#c2410c}\n.cn{display:inline-block;width:1.15em;text-align:left}\n.ar{display:flex;align-items:baseline;gap:4px;justify-content:center;font-variant-numeric:tabular-nums}\n.ar .k{font-weight:700;min-width:72px;text-align:right}\n.ar .t{color:#333}\n.tr-row{display:grid;grid-template-columns:1.25fr 1fr .55fr;gap:6px}\n.tr-row span:nth-child(3){text-align:right;font-weight:700}\n.rmk{display:flex;flex:1;min-height:56px;border:1.6px solid #111;border-top-width:0;margin-top:-7px}\n.rmk .cat{width:76px;flex:none;display:flex;align-items:center;justify-content:center;background:#1f3a5f;color:#fff;font-weight:700;letter-spacing:.3em;padding-left:.3em}\n.rmk .body{padding:7px 12px;line-height:1.65;white-space:pre-wrap;flex:1;font-weight:500}\n.foot{display:grid;grid-template-columns:1fr 1.15fr;border:1.6px solid #111;margin-top:4px}\n.foot .a{padding:7px 12px;border-right:1px solid #111;display:flex;flex-direction:column;justify-content:space-between;gap:3px}\n.foot .a .lic{font-size:calc(var(--fs) * .92)}\n.foot .a .assoc{font-size:calc(var(--fs) * .78);color:#333;white-space:pre-wrap;line-height:1.45}\n.foot .a .co{font-size:calc(var(--fs) * 1.55);font-weight:900;letter-spacing:.08em}\n.foot .a .co .br{font-size:.66em;margin-left:.6em;letter-spacing:.12em}\n.foot .a .lixil{display:inline-block;background:#e2580e;color:#fff;font-size:calc(var(--fs) * .72);font-weight:700;padding:1px 6px;letter-spacing:.06em;align-self:flex-start}\n.foot .b{padding:6px 10px 6px 12px;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}\n.foot .b .tel{color:#c2410c;font-weight:900;font-size:calc(var(--fs) * 1.6);letter-spacing:.06em;line-height:1.2}\n.foot .b .ln{font-size:calc(var(--fs) * .88);line-height:1.5}\n.foot .b .qr{text-align:center;font-size:calc(var(--fs) * .72)}\n.foot .b .qr img{width:66px;height:66px;display:block;image-rendering:pixelated}\n.hl .unc{background:#fff0c2;box-shadow:inset 0 -2px 0 #e0a52b}\n.sheet.photo{background:#111}\n.sheet .bgimg{position:absolute;inset:0;background-size:cover;background-position:center}\n.sheet.mapp,.sheet.ph{display:flex;flex-direction:column;padding:26px 30px 22px}\n.mhead{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;border-bottom:2px solid #1f3a5f;padding-bottom:5px;margin-bottom:12px}\n.mhead b{font-size:20px;color:#1f3a5f;letter-spacing:.2em;white-space:nowrap}\n.mhead span{font-size:11px;color:#555;text-align:right}\n.mbody{flex:1;display:flex;align-items:center;justify-content:center;min-height:0}\n.mbody img{max-width:100%;max-height:100%;display:block}\n.mfoot{font-size:10px;color:#666;text-align:right;margin-top:8px}\n.phbox{flex:1;display:grid;gap:8px;min-height:0}\n.phc{position:relative;background-size:cover;background-position:center;background-color:#e9ecef;min-height:0}\n.phc span{position:absolute;left:0;bottom:0;background:rgba(17,24,39,.74);color:#fff;font-size:11px;padding:3px 9px;letter-spacing:.04em;max-width:100%}\n.phbox.L5{grid-template-columns:1fr 1fr;grid-template-rows:1.6fr 1fr 1fr}\n.phbox.L5 .c0{grid-column:1/3}\n.phbox.P5{grid-template-columns:1.2fr 1fr;grid-template-rows:1fr 1fr .95fr}\n.phbox.P5 .c0{grid-row:1/3}\n.phbox.L4{grid-template-columns:1fr 1fr 1fr;grid-template-rows:1.7fr 1fr}\n.phbox.L4 .c0{grid-column:1/4}\n.phbox.P4{grid-template-columns:1.25fr 1fr;grid-template-rows:1fr 1fr 1fr}\n.phbox.P4 .c0{grid-row:1/4}\n.phbox.L3,.phbox.P3{grid-template-columns:1fr 1fr;grid-template-rows:1.6fr 1fr}\n.phbox.L3 .c0,.phbox.P3 .c0{grid-column:1/3}\n.phbox.L2,.phbox.P2{grid-template-columns:1fr;grid-template-rows:1.4fr 1fr}\n.phbox.L1,.phbox.P1{grid-template-columns:1fr;grid-template-rows:1fr}\n.phbox.G6{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr 1fr}\n\u003c/style>\n\u003c/head>\n\u003cbody>\n\u003cheader class=\"top\">\n  \u003cdiv class=\"brand\">\u003cb>物件資料メーカー\u003c/b>\u003cspan>株式会社大央ハウジング｜登記簿・物件レポート・地図・写真から物件概要書を自動作成\u003c/span>\u003c/div>\n  \u003cspan class=\"aichip\" id=\"aiChip\" role=\"status\">AI：確認中…\u003c/span>\n  \u003cdiv class=\"sp\">\u003c/div>\n  \u003cbutton class=\"btn ghost\" id=\"btnNew\" type=\"button\">新しい物件を作る\u003c/button>\n  \u003cbutton class=\"btn ghost\" id=\"btnPdf\" type=\"button\">PDFで書き出す\u003c/button>\n  \u003cbutton class=\"btn primary\" id=\"btnPrint\" type=\"button\">🖨 印刷する\u003c/button>\n\u003c/header>\n\u003cdiv class=\"wrap\">\n  \u003caside class=\"side\">\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">1\u003c/span>資料をまとめてドロップ\u003c/h2>\n      \u003cdiv class=\"drop\" id=\"drop\" tabindex=\"0\" role=\"button\" aria-label=\"ファイルを選択\">\n        \u003cstrong>登記簿・物件レポート・公図・地図・写真・その他の資料\u003c/strong>\n        \u003csmall>PDF・画像・Word・Excel・CSV・テキストを何件でも一度に。他社の販売図面やポータルの物件ページも読み取ります\u003c/small>\n        \u003cinput type=\"file\" id=\"file\" multiple accept=\".pdf,application/pdf,image/*,.docx,.docm,.xlsx,.xlsm,.pptx,.csv,.tsv,.txt,.md,.html,.htm,.eml,.json\" hidden>\n      \u003c/div>\n      \u003cdiv class=\"drop-more\">\u003cbutton class=\"btn sm\" id=\"btnPasteText\" type=\"button\">文章を貼り付けて読み込む\u003c/button>\u003cspan class=\"note\">画面写し（スクリーンショット）や文章は Ctrl+V（Macは⌘+V）でも入れられます\u003c/span>\u003c/div>\n      \u003cdiv id=\"bins\">\u003c/div>\n    \u003c/section>\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">2\u003c/span>備考メモ（話すだけでOK）と自動作成\u003c/h2>\n      \u003cdiv class=\"memo-h\">\n        \u003clabel class=\"f\" for=\"memo\">備考メモ \u003cspan class=\"note\">（思いついた順でOK）\u003c/span>\u003c/label>\n        \u003cbutton class=\"btn sm mic\" id=\"btnMic\" type=\"button\" hidden aria-pressed=\"false\">🎤 話して入力\u003c/button>\n      \u003c/div>\n      \u003ctextarea class=\"in\" id=\"memo\" rows=\"5\" placeholder=\"例）えーと、この物件は借地権で、地代は年間30万円かかります。あと雨漏りの箇所がいくつかあって、旧耐震の建物です。現況は賃貸中で、引渡しはご相談で。\">\u003c/textarea>\n      \u003cdiv class=\"mic-live\" id=\"micLive\" aria-live=\"polite\">\u003c/div>\n      \u003cdiv class=\"memo-foot\">\n        \u003cp class=\"note\">「物件資料を自動作成」を押すと、AIが備考欄に箇条書きで整理します。借地権・現況などは概要の欄にも反映します。\u003cspan id=\"micKbd\" hidden>スマホ・タブレットでは、キーボードのマイク（音声入力）で話して入力できます。\u003c/span>\u003c/p>\n        \u003cbutton class=\"btn sm\" id=\"btnTidy\" type=\"button\">備考だけ整理する\u003c/button>\n      \u003c/div>\n      \u003clabel class=\"f\" for=\"memoPrice\">売出価格（空欄ならレポートの想定価格）\u003c/label>\u003cinput class=\"in\" id=\"memoPrice\" placeholder=\"例）7億5,000万円\">\n      \u003cdiv class=\"grid2\">\n        \u003cdiv>\u003clabel class=\"f\" for=\"memoOffice\">帯（店舗）\u003c/label>\u003cselect class=\"in\" id=\"memoOffice\">\u003c/select>\u003c/div>\n        \u003cdiv>\u003clabel class=\"f\" for=\"memoTanto\">担当者 \u003cspan class=\"note\">（手入力できます）\u003c/span>\u003c/label>\u003cinput class=\"in\" id=\"memoTanto\" list=\"tantoList\" autocomplete=\"off\" placeholder=\"例）山田太郎 090-1234-5678\">\u003cdatalist id=\"tantoList\">\u003c/datalist>\u003c/div>\n      \u003c/div>\n      \u003clabel class=\"chk\">\u003cinput type=\"checkbox\" id=\"hiAcc\"> 高精度モード（時間はかかりますが、より慎重に読み取ります）\u003c/label>\n      \u003cbutton class=\"btn primary go\" id=\"btnGen\" type=\"button\">物件資料を自動作成\u003c/button>\n      \u003cdiv class=\"status\" id=\"status\" aria-live=\"polite\">\u003c/div>\n      \u003cdetails class=\"sec\" style=\"margin-top:12px\" id=\"webSec\">\n        \u003csummary>ネットの情報で裏付ける（任意）\u003c/summary>\n        \u003cdiv class=\"body\">\n          \u003cp class=\"note\" style=\"margin:6px 0 8px\">このアプリのAIはインターネットを直接検索できません。ネットで裏付けたいときは、指示文をコピーして Claude に貼り付け、返ってきた回答をここへ貼り付けてください。キャッチコピー・アピールポイント・交通・学校区に反映します。\u003c/p>\n          \u003cdiv style=\"display:flex;gap:8px;flex-wrap:wrap;align-items:center\">\u003cbutton class=\"btn sm\" id=\"btnCopyPrompt\" type=\"button\">調査の指示文をコピー\u003c/button>\u003ca href=\"https://claude.ai/new\" target=\"_blank\" rel=\"noopener\" class=\"note\">Claude を開く ↗\u003c/a>\u003c/div>\n          \u003ctextarea class=\"in\" id=\"promptBox\" rows=\"4\" style=\"margin-top:8px;display:none\" readonly>\u003c/textarea>\n          \u003ctextarea class=\"in\" id=\"webPaste\" rows=\"4\" style=\"margin-top:8px\" placeholder=\"Claude の回答をここに貼り付け\">\u003c/textarea>\n          \u003cbutton class=\"btn sm\" id=\"btnImport\" type=\"button\" style=\"margin-top:6px\">回答を取り込む\u003c/button>\n        \u003c/div>\n      \u003c/details>\n    \u003c/section>\n    \u003csection class=\"step\">\n      \u003ch2>\u003cspan class=\"n\">3\u003c/span>内容の確認・修正\u003c/h2>\n      \u003cdiv class=\"legend\">黄色の項目は推定です。確認した値に書き換えるとすぐプレビューに反映され、黄色が消えます。\u003c/div>\n      \u003cdiv id=\"qbox\">\u003c/div>\n      \u003cdiv id=\"form\">\u003c/div>\n    \u003c/section>\n  \u003c/aside>\n  \u003cmain class=\"stage\">\n    \u003cdiv class=\"toolbar\">\n      \u003cdiv class=\"toggles\">\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgPts\" checked> アピールポイントを載せる\u003c/label>\n        \u003clabel>写真ページ \u003cselect id=\"tgPhoto\">\u003coption value=\"5\">5枚レイアウト\u003c/option>\u003coption value=\"1\">外観1枚（全面）\u003c/option>\u003coption value=\"0\">入れない\u003c/option>\u003c/select>\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgCap\" checked> 写真に説明を入れる\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgMapHead\" checked> 地図ページに見出しを付ける\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgEnhance\" checked> 写真を明るく補正する\u003c/label>\n        \u003clabel>\u003cinput type=\"checkbox\" id=\"tgHl\" checked> 要確認の項目をプレビューで強調（PDFには出ません）\u003c/label>\n      \u003c/div>\n      \u003cdiv class=\"note\" id=\"pageCount\">\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"banner\" id=\"sampleBanner\">いま表示しているのは見本（前島三丁目一棟ビル）です。「新しい物件を作る」を押してから資料を入れてください。\u003c/div>\n    \u003cdiv class=\"banner bad\" id=\"aiBanner\" style=\"display:none\">\u003c/div>\n    \u003cdiv class=\"banner bad\" id=\"errBanner\" style=\"display:none\" role=\"alert\">\u003c/div>\n    \u003cdetails class=\"order\" id=\"orderBox\" open>\n      \u003csummary>\u003cb>資料の順番（PDFの並び）\u003c/b>\u003cspan class=\"note\" id=\"orderMode\">\u003c/span>\u003c/summary>\n      \u003cdiv class=\"order-body\">\n        \u003cp class=\"note\">行をドラッグするか ▲▼ で入れ替えられます。✕ で外した資料はPDFに入りません（「戻す」で元に戻せます）。資料の種類もここで直せます。\u003c/p>\n        \u003col class=\"order-list\" id=\"orderList\">\u003c/ol>\n        \u003cbutton class=\"btn sm\" id=\"orderReset\" type=\"button\">標準の順番に戻す\u003c/button>\n      \u003c/div>\n    \u003c/details>\n    \u003cdiv class=\"pages\" id=\"pages\">\u003c/div>\n  \u003c/main>\n\u003c/div>\n\u003cdiv class=\"modal\" id=\"printGuide\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"pgTitle\">\n  \u003cdiv class=\"mbox pg-guide\">\n    \u003cdiv class=\"mtop\">\u003cb id=\"pgTitle\">印刷用のPDFを用意しました\u003c/b>\u003cspan class=\"sp\">\u003c/span>\u003cbutton class=\"btn sm\" id=\"pgClose\" type=\"button\">閉じる\u003c/button>\u003c/div>\n    \u003cdiv class=\"pg-body\" id=\"pgBody\">\n      \u003cp>保存したPDFを開いて、プリンター（コピー機）を選んで印刷してください。\u003c/p>\n      \u003cul>\n        \u003cli>\u003cb>パソコン：\u003c/b>ダウンロードしたPDFを開き、\u003cb>Ctrl＋P\u003c/b>（Macは\u003cb>⌘＋P\u003c/b>）→ プリンターでコピー機を選んで「印刷」。用紙は\u003cb>A4\u003c/b>、倍率は\u003cb>「実際のサイズ」または「用紙に合わせる」\u003c/b>にしてください。\u003c/li>\n        \u003cli>\u003cb>iPhone・iPad：\u003c/b>表示された共有メニューの\u003cb>「プリント」\u003c/b>から、コピー機を選んで印刷できます（コピー機がAirPrintに対応している場合）。\u003c/li>\n      \u003c/ul>\n      \u003cp class=\"note\">このアプリはclaude.aiの安全な枠の中で動いているため、ページから直接プリンターの画面を開くことができません。そのため、印刷用のPDFを保存してから印刷する流れになっています。\u003c/p>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv class=\"modal\" id=\"measure\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"msTitle\">\n  \u003cdiv class=\"mbox\">\n    \u003cdiv class=\"mtop\">\n      \u003cb id=\"msTitle\">図面で測る\u003c/b>\n      \u003cselect id=\"msMap\" aria-label=\"図面\">\u003c/select>\n      \u003cspan id=\"msScaleWrap\">縮尺 1/\u003cinput id=\"msDen\" type=\"number\" min=\"50\" step=\"50\" value=\"500\" aria-label=\"縮尺の分母\">\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msZoomOut\" type=\"button\" aria-label=\"縮小\">－\u003c/button>\n      \u003cbutton class=\"btn sm\" id=\"msZoomIn\" type=\"button\" aria-label=\"拡大\">＋\u003c/button>\n      \u003cspan class=\"note\" id=\"msInfo\">\u003c/span>\n      \u003cspan style=\"flex:1\">\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msClose\" type=\"button\">閉じる\u003c/button>\n    \u003c/div>\n    \u003cdiv class=\"mcv\" id=\"msWrap\">\u003ccanvas id=\"msCanvas\">\u003c/canvas>\u003c/div>\n    \u003cdiv class=\"mbot\">\n      \u003cspan class=\"note\">2点をクリックすると距離を測ります。\u003c/span>\n      \u003cspan class=\"mres\" id=\"msRes\">—\u003c/span>\n      \u003cbutton class=\"btn sm\" id=\"msToFront\" type=\"button\" disabled>間口に入れる\u003c/button>\n      \u003cbutton class=\"btn sm\" id=\"msToRoad\" type=\"button\" disabled>道路幅員に入れる\u003c/button>\n      \u003cspan class=\"note\">｜縮尺が分からない図面は、縮尺バーなど長さの分かる2点を測って\u003c/span>\n      \u003cinput id=\"msLen\" type=\"number\" step=\"0.1\" placeholder=\"長さm\" aria-label=\"既知の長さ（メートル）\">\n      \u003cbutton class=\"btn sm\" id=\"msCalib\" type=\"button\" disabled>で校正\u003c/button>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv id=\"offscreen\" style=\"position:fixed;left:0;top:0;z-index:-10;pointer-events:none\" aria-hidden=\"true\">\u003c/div>\n\u003cdiv class=\"busy\" id=\"busy\">\u003cdiv>\u003cb>PDFを作成しています\u003c/b>\u003cspan>ページ数が多いと数十秒かかります\u003c/span>\u003c/div>\u003c/div>\n\u003cdiv class=\"modal\" id=\"pasteBox\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"pbTitle\">\n  \u003cdiv class=\"mbox pg-guide\">\n    \u003cdiv class=\"mtop\">\u003cb id=\"pbTitle\">文章を貼り付けて読み込む\u003c/b>\u003cspan class=\"sp\">\u003c/span>\u003cbutton class=\"btn sm\" id=\"pbClose\" type=\"button\">閉じる\u003c/button>\u003c/div>\n    \u003cdiv class=\"pg-body\">\n      \u003cp class=\"note\" style=\"margin:0 0 8px\">グーホーム・うちなーらいふなどの物件ページや、他社から届いたメール・資料の文章を貼り付けてください。ページを開いて Ctrl+A（すべて選ぶ）→ Ctrl+C（コピー）→ ここに Ctrl+V で入ります。写真は画面写しで入れてください。\u003c/p>\n      \u003clabel class=\"f\" for=\"pbName\">資料の名前（任意）\u003c/label>\u003cinput class=\"in\" id=\"pbName\" placeholder=\"例）グーホームの物件ページ\">\n      \u003clabel class=\"f\" for=\"pbText\">文章\u003c/label>\u003ctextarea class=\"in\" id=\"pbText\" placeholder=\"ここに貼り付け\">\u003c/textarea>\n      \u003cdiv style=\"display:flex;gap:8px;margin-top:10px\">\u003cbutton class=\"btn primary\" id=\"pbOk\" type=\"button\">読み込む\u003c/button>\u003c/div>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>\n\u003cdiv class=\"toast\" id=\"toast\" role=\"status\">\u003c/div>\n\u003cdiv id=\"printArea\" aria-hidden=\"true\">\u003c/div>\n@@APP_SCRIPTS@@\n\u003c/body>\n\u003c/html>\n";</script>
 <script type="text/plain" id="pdfWorkerSrc" data-app="worker">/**
  * @licstart The following is the entire license notice for the
  * JavaScript code in this page
@@ -3905,7 +3749,7 @@ window.__CMAPS={"RKSJ-V":"A+BSQ29weXJpZ2h0IDE5OTAtMjAwOSBBZG9iZSBTeXN0ZW1zIEluY2
 <script data-app="app.js">/* app.js */
 /* 大央ハウジング 物件資料メーカー */
 "use strict";
-const APP_VERSION = "2026.11.26";
+const APP_VERSION = "2026.11.26-2";
 const WEB_URL = "https://md19880822-afk.github.io/daio-bukken/"; // Web版（リンクで使う版）の置き場
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -3943,6 +3787,8 @@ function schoolText(sc) {
 /* ---------- pdf.js（日本語CMapは同梱JSONから供給） ---------- */
 const STANDALONE = !!window.__STANDALONE; // パソコン版・Web版（1つのHTMLファイル。claude.aiの外で動く）
 const HOSTED = STANDALONE && /^https?:$/.test(location.protocol); // Web版（リンクで開く）
+const FREE = STANDALONE; // パソコン版・Web版は料金のかからない無料版（有料のAI＝APIは使わない）
+const CLAUDE_URL = "https://claude.ai/artifact/CH7Fseb5m4Y7aEoowWTsgg"; // AIを使う版（claude.ai。各自のアカウントで使う）
 pdfjsLib.GlobalWorkerOptions.workerSrc = (() => { const w = document.getElementById("pdfWorkerSrc"); return w ? URL.createObjectURL(new Blob([w.textContent], { type: "text/javascript" })) : "lib/pdf.worker.min.js"; })();
 let _cm = null;
 class JsonCMapFactory {
@@ -4041,11 +3887,11 @@ async function initAI() {
 }
 function renderAiChip() {
   const c = $("#aiChip"), b = $("#aiBanner");
-  const t = { checking: "AI：確認中…", full: "AI：利用できます", text: "AI：画像を読めない表示です", none: STANDALONE ? "AI：未設定（クリックで設定）" : "AI：この表示では使えません" }[AI.state];
+  const t = { checking: "AI：確認中…", full: "AI：利用できます", text: "AI：画像を読めない表示です", none: FREE ? "AI：使わない（無料版）" : "AI：この表示では使えません" }[AI.state];
   c.textContent = t; c.className = "aichip " + AI.state;
-  if (AI.state === "text") { b.style.display = ""; b.textContent = "この表示ではAIに画像を送れないため、物件レポート・公図・写真の読み取りができません（登記簿と用途地域図の文字だけで作成します）。claude.ai をブラウザで開いてお使いください。"; }
-  else if (AI.state === "none" && STANDALONE) { b.style.display = ""; b.textContent = HOSTED ? "AI（物件レポート・その他の資料の読み取り、資料の判別、アピールポイント作成など）を使うには、管理者から配られた「社員用リンク」を開いてください。管理者の方は、手順2の下の「AIの設定」にAPIキーを入れると使え、社員用リンクも作れます。登記簿・用途地域図の読み取り、PDF保存、印刷はそのまま使えます。" : "パソコン版でAI（物件レポート・その他の資料の読み取り、資料の判別、アピールポイント作成など）を使うには、手順2の下の「AIの設定」にAPIキーを入れてください。登記簿・用途地域図の読み取り、PDF保存、印刷はそのまま使えます。"; }
-  else if (AI.state === "none") { b.style.display = ""; b.textContent = "この表示ではAIを使えません。登記簿・用途地域図の機械読み取りだけで作成します。claude.ai をブラウザで開くと、物件レポートの読み取り・アピールポイント作成まで自動で行えます。"; }
+  if (AI.state === "text") { b.style.display = ""; b.textContent = "この表示ではAIに画像を送れないため、物件レポート・公図・写真の読み取りができません（登記簿・用途地域図・文字のある資料は読み取れます）。"; }
+  else if (AI.state === "none" && FREE) { b.style.display = ""; b.innerHTML = `この版は<b>料金のかからない無料版</b>です（AIは使いません）。登記簿・用途地域図と、文字のある資料（Word・Excel・CSV・PDF・貼り付けた文章・他社の販売図面）は自動で読み取ります。物件レポートや画像の資料の読み取り、写真の選別、キャッチコピー作成などのAI機能は、<a href="${CLAUDE_URL}" target="_blank" rel="noopener">claude.ai版</a>（各自の claude.ai アカウントで使えます。無料プランも可）でお使いください。`; }
+  else if (AI.state === "none") { b.style.display = ""; b.textContent = "この表示ではAIを使えません。登記簿・用途地域図と、文字のある資料の機械読み取りだけで作成します。claude.ai にログインして開くと、AIの機能も使えます。"; }
   else b.style.display = "none";
 }
 const ERR = {
@@ -4311,7 +4157,7 @@ function applyZoningFromMaps() {
 }
 
 /* ---------- ファイル振り分け ---------- */
-const MAP_KEYS = [["広域", "広域地図"], ["拡大", "拡大地図"], ["住宅地図", "拡大地図"], ["ゼンリン", "拡大地図"], ["詳細図", "拡大地図"], ["航空", "航空写真"], ["公図", "公図"], ["地積", "地積測量図"], ["用途", "用途地域図"], ["都市計画", "用途地域図"], ["案内図", "広域地図"], ["地図", "地図"]];
+const MAP_KEYS = [["販売図面", "販売図面"], ["マイソク", "販売図面"], ["チラシ", "販売図面"], ["広域", "広域地図"], ["拡大", "拡大地図"], ["住宅地図", "拡大地図"], ["ゼンリン", "拡大地図"], ["詳細図", "拡大地図"], ["航空", "航空写真"], ["公図", "公図"], ["地積", "地積測量図"], ["用途", "用途地域図"], ["都市計画", "用途地域図"], ["案内図", "広域地図"], ["地図", "地図"]];
 const MAP_LABELS = ["広域地図", "拡大地図", "公図", "航空写真", "用途地域図", "地積測量図", "建物図面", "間取り図", "地図", "書類", "販売図面", "その他", "未分類"];
 const DOC_LABELS = ["書類", "販売図面", "その他", "未分類"]; // 地図の枠を付けず、1ページにそのまま載せる資料
 const isDocLabel = l => DOC_LABELS.includes(l);
@@ -4351,7 +4197,8 @@ async function addFiles(files) {
         const lb = labelFromName(f.name);
         const g = await ingestImage(f, lb ? 3200 : 2400);
         const item = { id: ++uid, name: f.name, url: g.url, w: g.w, h: g.h, thumb: g.thumb, include: true, caption: "" };
-        if (lb) { Object.assign(item, { label: lb, labelSrc: "name", auto: true, title: "" }); S.maps.push(item); } else { item.include = S.photos.filter(p => p.include).length < 5; S.photos.push(item); queueEnhance(item); }
+        if (lb === "販売図面") { Object.assign(item, { label: lb, labelSrc: "name", auto: false, title: "", include: false, aiNote: "販売図面のため、資料には綴じずに内容を読み取ります（綴じる場合は✓）" }); S.maps.push(item); }
+        else if (lb) { Object.assign(item, { label: lb, labelSrc: "name", auto: true, title: "" }); S.maps.push(item); } else { item.include = S.photos.filter(p => p.include).length < 5; S.photos.push(item); queueEnhance(item); }
         continue;
       }
       const buf = await f.arrayBuffer();
@@ -5168,7 +5015,7 @@ async function docCrops(doc, photos, urls) {
 function applyDocRead(doc, o, cap) {
   const st = { set: [], conflict: [], confirm: 0, extra: 0, remarks: 0, internal: 0 };
   const f = o.fields && typeof o.fields === "object" ? o.fields : {};
-  const other = o.isOtherCompanyAd === true || o.isOtherCompanyAd === "true", maxRank = other || doc.brochure ? 65 : 100;
+  const other = o.isOtherCompanyAd === true || o.isOtherCompanyAd === "true", maxRank = Math.min(cap || 100, other || doc.brochure ? 65 : 100);
   for (const [k, raw] of Object.entries(f)) {
     if (!(k in DOC_FIELDS)) continue;
     const item = raw && typeof raw === "object" ? raw : { value: raw };
@@ -5234,14 +5081,131 @@ function docResultMsg(doc, st, crops) {
   if (st.internal) parts.push("社内メモあり");
   return `✓ ${doc.docType || "資料"}${doc.company ? `（${doc.company}）` : ""}：${parts.join("、") || "載せる情報はありませんでした"}`;
 }
-// 読み取っていない資料をAIで読む（自動作成の途中と、「資料を読み取る」ボタンから）
+/* ---------- AIを使わない読み取り（無料版）：「見出し：内容」の形で書かれた文字から読む ---------- */
+const RULE_LABELS = [
+  ["price", ["販売価格", "売買価格", "売出価格", "物件価格", "価格"]],
+  ["name", ["物件名称", "物件名", "建物名", "マンション名"]],
+  ["addrReg", ["地番"]], ["addrDisp", ["住居表示"]], ["addr", ["物件所在地", "所在地", "所在", "住所"]],
+  ["transport", ["交通", "最寄駅", "最寄り駅", "最寄バス停", "最寄りバス停", "アクセス"]],
+  ["areaJissoku", ["土地面積(実測)", "土地面積（実測）", "実測面積"]],
+  ["areaKobo", ["土地面積(公簿)", "土地面積（公簿）", "公簿面積", "土地面積", "敷地面積", "地積"]],
+  ["bArea", ["延床面積", "延べ床面積", "建物面積", "専有面積", "床面積"]],
+  ["bStructure", ["建物構造", "構造"]], ["bKind", ["建物種類", "物件種目", "種目", "種類"]],
+  ["built", ["築年月日", "築年月", "建築年月", "完成年月", "新築年月", "建築時期"]],
+  ["zoning", ["用途地域"]], ["kenpei", ["建ぺい率", "建蔽率", "建ペい率"]], ["yoseki", ["容積率"]], ["bouka", ["防火指定", "防火・準防火地域", "防火地域"]],
+  ["chimoku", ["地目"]], ["kenri", ["土地権利", "土地の権利", "権利形態", "権利"]], ["genkyo", ["現況"]], ["kyokai", ["境界確定", "境界"]], ["kensa", ["検査済証"]],
+  ["road", ["前面道路", "接道状況", "接道", "道路"]], ["josui", ["上水道", "水道"]], ["gesui", ["下水道", "下水", "排水"]], ["gas", ["ガス"]], ["denki", ["電気"]], ["setsubi", ["設備"]],
+  ["elem", ["小学校区", "小学校"]], ["junior", ["中学校区", "中学校"]], ["gakku", ["学校区", "学区"]],
+  ["x:引渡し", ["引渡し時期", "引渡時期", "引き渡し", "引渡し", "引渡"]], ["x:私道負担", ["私道負担"]], ["x:セットバック", ["セットバック"]],
+  ["x:管理費", ["管理費"]], ["x:修繕積立金", ["修繕積立金"]], ["x:駐車場", ["駐車場"]],
+  ["x:表面利回り", ["表面利回り", "想定利回り", "利回り"]],
+  ["x:満室時年間賃料", ["満室時年間賃料", "満室時年間収入", "満室想定賃料(年額)", "満室想定賃料（年額）", "満室時年収", "満室想定年収", "想定年収", "年間賃料収入", "年間収入"]],
+  ["x:総戸数", ["総戸数"]], ["x:所在階", ["所在階"]], ["x:間取り", ["間取り"]], ["x:バルコニー面積", ["バルコニー面積"]], ["x:地代", ["地代"]], ["x:借地期間", ["借地期間"]], ["x:管理形態", ["管理形態"]],
+  ["i:取引態様", ["取引態様"]], ["i:会社", ["取扱会社", "取扱い会社", "情報提供会社", "会社名", "商号", "お問い合わせ先", "問合せ先"]]
+];
+const RULE_RE = (() => {
+  const all = RULE_LABELS.flatMap(([k, ls]) => ls.map(l => [z2h(l), k])).sort((a, b) => b[0].length - a[0].length);
+  const esc2 = t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return { map: new Map(all), re: new RegExp(`(^|[\\s　・|【［\\[(（「■◆●□◇○])(${all.map(([l]) => esc2(l)).join("|")})(?=[\\s　:：|】］\\])）」]|$|[0-9])[】］\\])）」]?[\\s　]*[:：]?[\\s　]*`, "g") };
+})();
+// 文字から「見出し → 内容」を拾う（表は「|」やタブで区切られている前提）
+function ruleRead(text) {
+  const { re, map } = RULE_RE, got = {};
+  const lines = z2h(String(text || "")).replace(/\r/g, "").split("\n").map(l => l.replace(/\t+/g, " | ").replace(/[  ]+/g, " ").trim()).filter(Boolean);
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i], ms = [...L.matchAll(re)];
+    for (let j = 0; j < ms.length; j++) {
+      const key = map.get(ms[j][2]); if (!key || key in got) continue;
+      const start = ms[j].index + ms[j][0].length, end = j + 1 < ms.length ? ms[j + 1].index : L.length;
+      let v = L.slice(start, end).replace(/^[\s|:：・、]+|[\s|:：、,]+$/g, "").trim();
+      if (!v && j === ms.length - 1 && i + 1 < lines.length && !lines[i + 1].match(re)) v = lines[i + 1].replace(/^[\s|]+|[\s|]+$/g, "");
+      if (v && v.length <= 80) got[key] = v;
+    }
+  }
+  return got;
+}
+function guessDocType(doc, other) {
+  const t = String(doc.text || "").replace(/\s/g, "");
+  if (/重要事項説明/.test(t)) return "重要事項説明書";
+  if (/レントロール|賃料一覧|入居者一覧/.test(t + doc.name)) return "レントロール";
+  if (/課税明細|納税通知|評価証明/.test(t + doc.name)) return "固定資産税の書類";
+  if (/売買契約/.test(t)) return "売買契約書";
+  if (/賃貸借契約/.test(t)) return "賃貸借契約書";
+  if (PORTAL_RE.test(t)) return "ポータルサイトの物件ページ";
+  return other ? "他社の販売図面" : "資料";
+}
+// 読み取った見出しと内容を、AIの答えと同じ形にする（反映のしかたはAIと共通）
+function ruleDoc(doc) {
+  const g = ruleRead(doc.text), f = {}, extra = [], internal = [];
+  const put = (k, v) => { v = String(v || "").trim(); if (v) f[k] = { value: v, evidence: "文字から簡易読み取り", confidence: "中" }; };
+  const sqm = v => { const m = z2h(v || "").replace(/,/g, "").match(/([\d.]+)\s*(?:㎡|m2|m²|平方メートル|平米)/); return m ? m[1] : ""; };
+  if (g.price) { const m = z2h(g.price).replace(/\s/g, "").match(/(?:[\d,.]+億)?(?:[\d,.]+万)?[\d,]*円/); if (m && /\d/.test(m[0])) put("price", m[0]); }
+  if (g.name && g.name.length <= 40) put("name", g.name);
+  if (g.addrReg) put("addrReg", g.addrReg);
+  if (g.addrDisp) put("addrDisp", g.addrDisp);
+  if (g.addr) { if (/\d+番(\d+)?$|\d+番地?$/.test(g.addr) && !/号/.test(g.addr)) { if (!g.addrReg) put("addrReg", g.addr); } else if (!g.addrDisp) put("addrDisp", g.addr); }
+  const tr = [];
+  for (const part of String(g.transport || "").split(/[／/;；]|\s\|\s/)) {
+    const m = part.match(/^(.*?)[「『]?([^\s「」『』|]{1,20}?(?:駅|バス停|停留所|停))[」』]?\s*(?:から|より)?\s*(徒歩\s*約?\s*\d+\s*分|車\s*約?\s*\d+\s*分)/);
+    if (m && tr.length < 3) tr.push({ line: m[1].trim(), stop: m[2], walk: m[3].replace(/\s/g, "") });
+  }
+  if (g.areaKobo && sqm(g.areaKobo)) put("areaKobo", sqm(g.areaKobo));
+  if (g.areaJissoku && sqm(g.areaJissoku)) put("areaJissoku", sqm(g.areaJissoku));
+  const bl = g.bArea || g.bStructure ? [{ no: "", kind: g.bKind && g.bKind.length <= 12 ? g.bKind : "", structure: String(g.bStructure || "").slice(0, 30), area: sqm(g.bArea) }] : [];
+  if (g.built && g.built.length <= 20) put("built", g.built);
+  if (g.zoning) { const zs = ZONES.filter(z => g.zoning.includes(z) && !ZONES.some(o => o !== z && o.includes(z) && g.zoning.includes(o))); if (zs[0]) put("zoning", zs[0]); if (zs[1]) put("zoning2", zs[1]); }
+  const pct = v => (z2h(v || "").match(/\d{2,3}\s*%/g) || []).map(x => x.replace(/\s/g, ""));
+  const kp = pct(g.kenpei), ys = pct(g.yoseki);
+  if (kp[0]) put("kenpei", kp[0]); if (kp[1]) put("kenpei2", kp[1]); if (ys[0]) put("yoseki", ys[0]); if (ys[1]) put("yoseki2", ys[1]);
+  if (g.bouka) put("bouka", /準防火/.test(g.bouka) ? "準防火地域" : /防火/.test(g.bouka) ? "防火地域" : /なし|無/.test(g.bouka) ? "指定なし" : "");
+  if (g.chimoku && g.chimoku.length <= 12) put("chimoku", g.chimoku);
+  if (g.kenri) { const m = g.kenri.match(/定期借地権|借地権|所有権|地上権|賃借権/); if (m) put("kenri", m[0]); }
+  if (g.genkyo && g.genkyo.length <= 20) put("genkyo", g.genkyo);
+  if (g.kyokai && g.kyokai.length <= 20) put("kyokai", g.kyokai);
+  if (g.kensa) put("kensa", /有|あり|取得/.test(g.kensa) ? "有" : /無|なし|未/.test(g.kensa) ? "無" : "");
+  if (g.road && g.road.length <= 60) put("road", g.road);
+  const st = [g.setsubi, g.josui, g.gesui, g.gas, g.denki].filter(Boolean).join(" ");
+  const pick = (k, own, re) => { if (own && own.length <= 20) put(k, own); else { const m = st.match(re); if (m) put(k, m[0]); } };
+  pick("josui", g.josui, /公営水道|上水道|井戸/); pick("gesui", g.gesui, /本下水|公共下水|浄化槽|下水道/); pick("gas", g.gas, /都市ガス|プロパンガス|プロパン|LPガス|オール電化/); pick("denki", g.denki, /沖縄電力|電気/);
+  if (g.gakku && g.gakku.length <= 40) put("gakku", g.gakku);
+  else { const sc = [g.elem, g.junior].filter(x => x && x.length <= 20); if (sc.length) put("gakku", sc.join("／")); }
+  for (const [k, v0] of Object.entries(g)) {
+    if (!k.startsWith("x:") || v0.length > 40) continue;
+    const label = k.slice(2), v = /賃料|収入|年収|管理費|積立金|地代/.test(label) && /^\d{3,}$/.test(v0.replace(/,/g, "")) ? Number(v0.replace(/,/g, "")).toLocaleString("ja-JP") + "円" : v0;
+    extra.push({ label, value: v, evidence: "文字から簡易読み取り", confidence: "中" });
+  }
+  const other = !!doc.brochure || (listingScore(doc.text) >= 6 && !/大央ハウジング/.test(doc.text));
+  let company = g["i:会社"] || "";
+  if (!company && other) { const m = z2h(doc.text).match(/(?:株式会社|有限会社|\(株\)|（株）)\s?[^\s　、。,()（）]{1,16}|[^\s　、。,()（）]{1,16}(?:株式会社|不動産)/g); company = (m || []).find(x => !/大央/.test(x)) || ""; }
+  company = company.replace(/\s*(TEL|ＴＥＬ|Tel|電話|℡|FAX|ＦＡＸ|免許|〒|担当).*$/, "").trim();
+  if (other && g["i:取引態様"]) internal.push(`他社の資料の取引態様：${g["i:取引態様"]}`);
+  return { docType: guessDocType(doc, other), isOtherCompanyAd: other, sourceCompany: company.slice(0, 30), fields: f, transport: tr, buildings: bl, extra, remarks: [], internal };
+}
+// AIを使わずに、資料の数字からアピールポイントの下書きを作る
+function rulePoints() {
+  const d = S.d, pts = [], ex = d.extra || [];
+  const tr = d.transport.find(r => r.stop); if (tr) pts.push({ label: "交通", text: `${tr.line ? tr.line + " " : ""}${tr.stop}${tr.walk ? " " + tr.walk : ""}`.trim() });
+  const a = num(d.areaKobo) || num(d.areaJissoku); if (a) pts.push({ label: "土地", text: `${num(d.areaKobo) ? "公簿" : "実測"}${a.toFixed(2)}㎡（約${(a * 0.3025).toFixed(1)}坪）${d.chimoku ? "・地目" + d.chimoku : ""}` });
+  if (d.zoning) pts.push({ label: "法令", text: `${d.zoning}${d.kenpei ? "・建ぺい率" + d.kenpei : ""}${d.yoseki ? "・容積率" + d.yoseki : ""}` });
+  if (d.gakku) pts.push({ label: "学区", text: d.gakku });
+  const inc = ex.find(x => /年間賃料|年収|年間収入/.test(x.label)), yl = ex.find(x => /利回り/.test(x.label));
+  if (inc || yl) pts.push({ label: "収益", text: [inc && `${inc.label} ${inc.value}`, yl && `${yl.label} ${yl.value}`].filter(Boolean).join("・") });
+  return pts.slice(0, 5);
+}
+// 読み取っていない資料をAIで読む（AIを使わないときは文字から簡易読み取り）（自動作成の途中と、「資料を読み取る」ボタンから）
 async function readDocs(onStep) {
   ensureDocsFromMaps();
-  const list = S.docs.filter(d => d.include !== false && !d.res?.ok && !(d.res?.err && d.res.final));
+  const list = S.docs.filter(d => d.include !== false && (!d.res?.ok || (d.res.rule && AI.fn)) && !(d.res?.err && d.res.final));
   const tot = { n: 0, set: 0, conflict: 0, extra: 0, crops: 0, err: 0, skipped: 0 };
   for (let i = 0; i < list.length; i++) {
     const doc = list[i]; onStep?.(i, list.length, doc);
-    if (!AI.fn) { doc.res = { msg: "AIが使えるときに読み取ります" }; tot.skipped++; continue; }
+    if (!AI.fn) {
+      if (doc.kind === "image" || (doc.kind === "pdf" && doc.scan)) { doc.res = { msg: FREE ? "画像・スキャンの資料はAIがないと読めません（claude.ai版なら読めます）" : "画像の資料は、AIが使えるときに読み取ります" }; tot.skipped++; continue; }
+      const st = applyDocRead(doc, ruleDoc(doc), 58);
+      doc.res = { ok: true, rule: true, msg: docResultMsg(doc, st, doc.photos || 0).replace(/^✓ /, "✓ 簡易読み取り・") };
+      tot.n++; tot.set += st.set.length; tot.conflict += st.conflict.length; tot.extra += st.extra;
+      continue;
+    }
     try {
       const { o, urls } = await aiReadDoc(doc);
       const st = applyDocRead(doc, o);
@@ -5259,12 +5223,11 @@ async function readDocs(onStep) {
 }
 async function readDocsNow() {
   if (S.busy) return;
-  if (!AI.fn) { toast(AI.state === "none" && STANDALONE ? "AIの設定（APIキー）をすると、資料を読み取れます。" : "この表示ではAIを使えないため、資料を読み取れません。", 5000); return; }
   S.busy = true; $("#btnGen").disabled = true;
   try {
     const t = await readDocs((i, n, d) => toast(`資料を読み取っています（${i + 1}／${n}）：${d.name}`, 60000));
     ensureFloorRemark(); renderBins(); renderForm(); renderPages();
-    toast(t.n ? `${t.n}件の資料を読み取り、${t.set}項目を反映しました${t.conflict ? `（今の値と違うもの${t.conflict}件は黄色の枠に印を付けました）` : ""}。` : t.err ? "資料を読み取れませんでした。資料の欄の説明をご確認ください。" : "新しく読み取る資料はありません。", 7000);
+    toast(t.n ? `${t.n}件の資料を読み取り、${t.set}項目を反映しました${t.conflict ? `（今の値と違うもの${t.conflict}件は黄色の枠に印を付けました）` : ""}。${AI.fn ? "" : "AIを使わない簡易読み取りのため、内容をご確認ください。"}` : t.err ? "資料を読み取れませんでした。資料の欄の説明をご確認ください。" : t.skipped ? "画像・スキャンの資料は、AIを使わないと読み取れません。" : "新しく読み取る資料はありません。", 8000);
   } finally { S.busy = false; $("#btnGen").disabled = false; }
 }
 
@@ -5474,13 +5437,12 @@ async function generate() {
     }
     // 6：その他の資料（Word・Excel・CSV・書類・他社の販売図面・ポータルの物件ページ）を読み、項目に反映
     ensureDocsFromMaps();
-    if (!S.docs.some(d => d.include !== false && !d.res?.ok)) skip(6, S.docs.length ? "新しく読み取る資料はありません" : "その他の資料はありません");
-    else if (!txt) skip(6, AI.state === "none" && STANDALONE ? "AIの設定（APIキー）をすると読み取れます" : "この表示ではAIを使えません");
+    if (!S.docs.some(d => d.include !== false && (!d.res?.ok || (d.res.rule && AI.fn)))) skip(6, S.docs.length ? "新しく読み取る資料はありません" : "その他の資料はありません");
     else {
       run(6);
       try {
         const t = await readDocs((i, n, d) => { st[6].msg = `${i + 1}／${n}件目：${d.name}`; setStatus(st); });
-        const msg = [t.n ? `${t.n}件を読み取り、${t.set}項目を反映` : "", t.extra ? `その他の項目${t.extra}件` : "", t.conflict ? `今の値と違うもの${t.conflict}件（黄色の枠で確認）` : "", t.crops ? `写真・図面を${t.crops}枚切り出し` : "", t.err ? `${t.err}件は読み取れませんでした（資料の欄に理由）` : ""].filter(Boolean).join("／");
+        const msg = [t.n ? `${t.n}件を${AI.fn ? "" : "文字から簡易"}読み取り、${t.set}項目を反映` : "", t.skipped ? `画像の資料${t.skipped}件はAIなしでは読めません` : "", t.extra ? `その他の項目${t.extra}件` : "", t.conflict ? `今の値と違うもの${t.conflict}件（黄色の枠で確認）` : "", t.crops ? `写真・図面を${t.crops}枚切り出し` : "", t.err ? `${t.err}件は読み取れませんでした（資料の欄に理由）` : ""].filter(Boolean).join("／");
         t.err && !t.n ? ng(6, msg) : done(6, msg || "載せる情報はありませんでした");
       } catch (e) { ng(6, errMsg(e)); }
       renderBins(); renderForm(); renderPages();
@@ -5491,7 +5453,11 @@ async function generate() {
     else skip(7, "写真が2枚未満です");
     // 8：コピー
     if (txt) { run(8); try { applyCopy(await aiCopy()); ok(8); } catch (e) { ng(8, errMsg(e)); } }
-    else skip(8, "この表示ではAIを使えません");
+    else {
+      const pts = S.src.points === "manual" ? [] : rulePoints();
+      if (pts.length) { S.d.points = pts; S.src.points = "rule"; S.unc.add("points"); S.notes.points = "AIを使わずに、資料の数字から作った下書きです。言い回しを整えてください"; done(8, "AIを使わずに、資料の数字からアピールポイントの下書きを作りました（キャッチコピーは手入力）"); }
+      else skip(8, FREE ? "無料版のため、キャッチコピー・アピールポイントは手入力です" : "この表示ではAIを使えません");
+    }
     if ($("#memoPrice").value.trim()) setv("price", $("#memoPrice").value.trim(), "manual");
     ensureFloorRemark(); ensureZoneRemark();
     run(9); baseQuestions(); renderBins(); renderForm(); renderPages(); ok(9);
@@ -6419,78 +6385,9 @@ window.addEventListener("unhandledrejection", e => { const r = e?.reason; if (r 
 document.addEventListener("click", e => { if (e.target.id === "errRedraw") { $("#errBanner").style.display = "none"; try { renderBins(); renderForm(); } catch {} renderPages(); } });
 
 if (STANDALONE) {
-  const box = $("#aiSet"), cfg = window.__AI_CFG, company = cfg.company;
-  $("#webSec").hidden = true; // claude.ai に貼り付けて調べる機能は、パソコン版では使わない
-  const chip = $("#aiChip");
-  if (company) {
-    // 社内用：AIは会社のキーで動く。設定の画面は出さない
-    $(".brand b").insertAdjacentHTML("beforeend", `<small class="pcbadge" title="${esc(company.made ? (company.via === "link" ? "社員用リンクで設定：" : "作成：") + company.made : "")}">社内用</small>`);
-    ERR.bad_key = "AIのキーが使えなくなっています。管理者に新しい社内用ファイルをもらってください";
-    ERR.no_credit = "AIの利用残高が足りません。管理者に連絡してください";
-    ERR.bad_model = "AIの設定に誤りがあります。管理者に新しい社内用ファイルをもらってください";
-    document.title += "（社内用）";
-  } else {
-    document.title += HOSTED ? "（Web版）" : "（パソコン版）";
-    box.hidden = false; box.querySelector("summary").textContent = HOSTED ? "AIの設定（管理者用）" : "AIの設定（パソコン版）";
-    $(".brand b").insertAdjacentHTML("beforeend", `<small class="pcbadge">${HOSTED ? "Web版" : "パソコン版"}</small>`);
-    const fill = () => {
-      const c = cfg.get(); $("#aiKey").value = ""; $("#aiKey").placeholder = c.key ? "保存済み（変えるときだけ入力）" : "sk-ant-…";
-      $("#aiModel").value = c.model || ""; $("#aiKeyState").textContent = c.key ? `APIキー：保存済み（末尾 …${c.key.slice(-4)}）` : "APIキー：未設定";
-      $("#coDist").hidden = !c.key;
-    };
-    fill();
-    $("#aiSave").addEventListener("click", async () => {
-      const b = $("#aiSave"); if (b.disabled) return;
-      const c = cfg.get(), key = $("#aiKey").value.trim() || c.key, model = $("#aiModel").value;
-      if (!key) { toast("APIキーを入力してください。"); $("#aiKey").focus(); return; }
-      b.disabled = true; const old = b.textContent; b.textContent = "確認しています…";
-      try {
-        const r = await cfg.test(key, model);
-        if (!r.ok) { toast(ERR[r.code] || "AIにつながりませんでした。", 7000); return; }
-        cfg.set({ ...c, key, model }); fill(); await initAI(); toast("AIを使えるようにしました。", 4000);
-      } finally { b.disabled = false; b.textContent = old; }
-    });
-    $("#aiClear").addEventListener("click", async () => { const c = cfg.get(); delete c.key; cfg.set(c); fill(); await initAI(); toast("APIキーを消しました。"); });
-    // 社員に配るファイル（AI付き）を作る
-    $("#coMake").addEventListener("click", async () => {
-      const b = $("#coMake"); if (b.disabled) return;
-      const c = cfg.get(), key = $("#coKey").value.trim() || c.key, model = $("#aiModel").value || c.model || "";
-      if (!key) { toast("APIキーを入力してください。"); return; }
-      b.disabled = true; const old = b.textContent; b.textContent = "確認しています…";
-      try {
-        const r = await cfg.test(key, model);
-        if (!r.ok) { toast(ERR[r.code] || "AIにつながりませんでした。", 7000); return; }
-        b.textContent = "ファイルを作っています…";
-        const co = { license: S.co.license, assoc: S.co.assoc, coName: S.co.coName, url: S.co.url, offices: S.co.offices };
-        const blob = cfg.exportCompany({ key, model, co });
-        await DL.save({ filename: "物件資料メーカー_社内用.html", data: blob });
-        $("#coKey").value = "";
-        toast("社員用のファイルを保存しました。社内の共有フォルダーなどで配ってください。", 7000);
-      } catch (e) { console.error(e); toast("ファイルを作れませんでした。もう一度お試しください。", 5000); }
-      finally { b.disabled = false; b.textContent = old; }
-    });
-    // 社員用リンク：開くだけで、このキーでAIが使えるリンク（キーはリンクの中にだけ入り、サーバーには置かない）
-    $("#coLink").addEventListener("click", async () => {
-      const b = $("#coLink"); if (b.disabled) return;
-      const c = cfg.get(), key = $("#coKey").value.trim() || c.key, model = $("#aiModel").value || c.model || "";
-      if (!key) { toast("APIキーを入力してください。"); return; }
-      b.disabled = true; const old = b.textContent; b.textContent = "確認しています…";
-      try {
-        const r = await cfg.test(key, model);
-        if (!r.ok) { toast(ERR[r.code] || "AIにつながりませんでした。", 7000); return; }
-        const url = cfg.makeLink(key, model, HOSTED ? location.origin + location.pathname : WEB_URL);
-        $("#coLinkOut").value = url; $("#coLinkBox").hidden = false; $("#coKey").value = "";
-        let copied = false; try { await navigator.clipboard.writeText(url); copied = true; } catch { /* 手でコピー */ }
-        toast(copied ? "社員用リンクをコピーしました。LINEやメールで社員に送ってください。" : "社員用リンクを作りました。下の欄からコピーして社員に送ってください。", 7000);
-      } finally { b.disabled = false; b.textContent = old; }
-    });
-    $("#coLinkCopy").addEventListener("click", async () => {
-      const i = $("#coLinkOut"); i.select();
-      try { await navigator.clipboard.writeText(i.value); toast("コピーしました。"); } catch { document.execCommand?.("copy"); toast("コピーしました。"); }
-    });
-    chip.style.cursor = "pointer"; chip.title = "AIの設定を開く";
-    chip.addEventListener("click", () => { box.open = true; box.scrollIntoView({ behavior: "smooth", block: "center" }); });
-  }
+  $("#webSec").hidden = true; // claude.ai に貼り付けて調べる機能は、無料版では使わない
+  $(".brand b").insertAdjacentHTML("beforeend", `<small class="pcbadge">${HOSTED ? "Web版" : "パソコン版"}・無料</small>`);
+  document.title += HOSTED ? "（Web版・無料）" : "（パソコン版・無料）";
 }
 $(".brand span").insertAdjacentHTML("beforeend", `<span class="ver">版 ${APP_VERSION}</span>`);
 fillStaff();
